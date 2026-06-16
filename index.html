@@ -1,0 +1,1401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kamal Control v2 — Operations Platform</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
+<style>html,body{margin:0;padding:0;background:#080c18}*{font-family:'DM Sans',system-ui,sans-serif}input[type=date],input[type=week],select{color-scheme:dark}</style>
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+/* Kamal Control v2 — browser build (no modules) */
+const { useState, useEffect, useMemo } = React;
+
+// ───────────── CONSTANTS ─────────────
+const HOURS = ["9:00 AM", "10:00 AM","11:00 AM","12:00 PM","1:00 PM","2:00 PM","3:00 PM","4:00 PM","5:00 PM","6:00 PM","7:00 PM"];
+const SHRINK_KEYS = ["isp","emergency","dayoff","tech","late","nsnc","sick","shadowing"];
+const SHRINK_LABELS = {isp:"ISP/Outage",emergency:"Emergency",dayoff:"Day Off",tech:"Tech Issues",late:"Late/PT",nsnc:"NSNC",sick:"Sick",shadowing:"Shadowing"};
+const FILL_TARGET_DEFAULT = 87.2;
+const VERSION = "2.2";
+const DEFAULT_CAMPAIGNS = [{ id:"ssdi", name:"SSDI Campaign", createdAt: new Date().toISOString() }];
+const DEFAULT_CONFIG = (teams=[]) => ({
+  totalBudget: 218,
+  fillRateTarget: FILL_TARGET_DEFAULT,
+  shrinkageMin: 8.25,
+  shrinkageMax: 12.8,
+  noticeperiod: 10,
+  teams: teams.length ? teams : [
+    {name:"Hunters",required:27,buffer:0},{name:"Killers",required:29,buffer:0},{name:"Fighters",required:29,buffer:0},
+    {name:"Slayers",required:29,buffer:0},{name:"Titans",required:28,buffer:0},{name:"Nesting",required:24,buffer:0},
+    {name:"SSDI X",required:21,buffer:0},{name:"SSDI UN",required:9,buffer:0},{name:"HI",required:22,buffer:0}
+  ]
+});
+const DEFAULT_USERS = [
+  {id:"u1",name:"Kamal",role:"ceo",password:"kamal2024",campaignId:null,team:null,active:true},
+  {id:"u2",name:"TL Hunters",role:"tl",password:"tl123",campaignId:"ssdi",team:"Hunters",active:true},
+  {id:"u3",name:"TL Killers",role:"tl",password:"tl123",campaignId:"ssdi",team:"Killers",active:true},
+  {id:"u4",name:"TL Fighters",role:"tl",password:"tl123",campaignId:"ssdi",team:"Fighters",active:true},
+  {id:"u5",name:"TL Slayers",role:"tl",password:"tl123",campaignId:"ssdi",team:"Slayers",active:true},
+  {id:"u6",name:"TL Titans",role:"tl",password:"tl123",campaignId:"ssdi",team:"Titans",active:true},
+];
+
+// ───────────── STORAGE — shared live database (Supabase) + local cache ─────────────
+const SB_URL = "https://rsehuwhoqbexmuidfkzq.supabase.co";
+const SB_KEY = "sb_publishable_ehI3Ij0wJbbbqSqtHdBOAQ_5mfPw-2C";
+const SB_HDRS = { apikey: SB_KEY, Authorization: "Bearer " + SB_KEY };
+const SB_TBL = SB_URL + "/rest/v1/kamal_control_kv";
+const LOCAL_ONLY = new Set(["ko_session","ko_active_campaign"]); // per-device, never synced
+const cache = {};
+const pendingPush = new Map();   // key -> debounce timer (local edits in flight)
+let lastPull = null;             // server timestamp of newest row seen (delta polling)
+const SYNC = { status: "connecting" };
+const emitStatus = () => window.dispatchEvent(new Event("ko-status"));
+const emitData = () => window.dispatchEvent(new Event("ko-sync"));
+const emitRemote = () => window.dispatchEvent(new Event("ko-remote"));
+
+const LS = {
+  get:(k,def)=>{ if(k in cache) return cache[k]; try{ const v=localStorage.getItem(k); if(v!==null){ cache[k]=JSON.parse(v); return cache[k]; } }catch(e){} return def; },
+  set:(k,v)=>{ cache[k]=v; try{ localStorage.setItem(k,JSON.stringify(v)); }catch(e){} if(!LOCAL_ONLY.has(k)) queuePush(k); emitData(); },
+  remove:(k)=>{ delete cache[k]; try{ localStorage.removeItem(k); }catch(e){} if(!LOCAL_ONLY.has(k)) pushDelete(k); emitData(); },
+};
+const cKey = (cid,suffix) => `ko_${suffix}_${cid}`;
+
+function queuePush(k){ clearTimeout(pendingPush.get(k)); pendingPush.set(k, setTimeout(()=>doPush(k), 700)); }
+async function doPush(k){
+  pendingPush.delete(k);
+  if(!(k in cache)) return;
+  let val = cache[k];
+  try{
+    // hourly data: merge entry-by-entry so two TLs editing different teams/hours never overwrite each other
+    if(k.indexOf("ko_hourly_")===0){
+      const r = await fetch(`${SB_TBL}?key=eq.${encodeURIComponent(k)}&select=value`, { headers: SB_HDRS });
+      if(r.ok){ const rows = await r.json(); const remote = rows[0] && rows[0].value;
+        if(remote && typeof remote==="object" && !Array.isArray(remote) && !remote.__del){ val = {...remote, ...cache[k]}; cache[k]=val; try{ localStorage.setItem(k,JSON.stringify(val)); }catch(e){} }
+      }
+    }
+    const res = await fetch(SB_TBL, { method:"POST", headers:{...SB_HDRS,"Content-Type":"application/json",Prefer:"resolution=merge-duplicates"}, body: JSON.stringify([{ key:k, value:val }]) });
+    if(!res.ok) throw new Error("push "+res.status);
+    if(SYNC.status!=="online"){ SYNC.status="online"; emitStatus(); }
+  }catch(e){
+    SYNC.status="offline"; emitStatus();
+    pendingPush.set(k, setTimeout(()=>doPush(k), 6000)); // retry
+  }
+}
+async function pushDelete(k){
+  // tombstone instead of hard delete so other devices' delta polls see the deletion
+  try{ await fetch(SB_TBL, { method:"POST", headers:{...SB_HDRS,"Content-Type":"application/json",Prefer:"resolution=merge-duplicates"}, body: JSON.stringify([{ key:k, value:{__del:true} }]) }); }
+  catch(e){ SYNC.status="offline"; emitStatus(); }
+}
+async function pullAll(initial){
+  try{
+    const delta = !initial && lastPull;
+    const url = delta
+      ? `${SB_TBL}?select=key,value,updated_at&updated_at=gt.${encodeURIComponent(lastPull)}`
+      : `${SB_TBL}?select=key,value,updated_at`;
+    const r = await fetch(url, { headers: SB_HDRS });
+    if(!r.ok) throw new Error("pull "+r.status);
+    const rows = await r.json();
+    let changed = false;
+    const remoteKeys = new Set();
+    rows.forEach(({key,value,updated_at})=>{
+      remoteKeys.add(key);
+      if(updated_at && (!lastPull || updated_at > lastPull)) lastPull = updated_at;
+      if(LOCAL_ONLY.has(key) || pendingPush.has(key)) return;
+      if(value && typeof value==="object" && value.__del){
+        if(key in cache){ delete cache[key]; try{ localStorage.removeItem(key); }catch(e){} changed = true; }
+        return;
+      }
+      if(JSON.stringify(cache[key]) !== JSON.stringify(value)){
+        cache[key]=value; try{ localStorage.setItem(key,JSON.stringify(value)); }catch(e){}
+        changed = true;
+      }
+    });
+    if(!delta){
+      // first full pull: migrate this device's existing data up if server doesn't have it
+      Object.keys(cache).forEach(k=>{
+        if(LOCAL_ONLY.has(k) || pendingPush.has(k) || k.indexOf("ko_")!==0) return;
+        if(!remoteKeys.has(k)) queuePush(k);
+      });
+    }
+    SYNC.status="online";
+    if(changed){ emitRemote(); emitData(); }
+  }catch(e){ SYNC.status="offline"; }
+  emitStatus();
+}
+function bootSync(){
+  try{ for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(k&&k.indexOf("ko_")===0){ try{ cache[k]=JSON.parse(localStorage.getItem(k)); }catch(e){} } } }catch(e){}
+  const first = Promise.race([ pullAll(true), new Promise(res=>setTimeout(res, 8000)) ]);
+  setInterval(()=>pullAll(false), 10000);
+  window.addEventListener("focus", ()=>pullAll(false));
+  return first;
+}
+
+// ───────────── HELPERS ─────────────
+const todayStr = () => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; };
+const fmtDate = (d) => { if(!d) return "—"; try{ const dt=new Date(d+(String(d).length===10?"T00:00:00":"")); if(isNaN(dt)) return d; return dt.toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"}); }catch(e){return d;} };
+const diffDays = (a,b) => { try{ return Math.floor((new Date(b)-new Date(a))/864e5); }catch(e){return 0;} };
+const monthKey = (d) => { try{ const dt=new Date(d); if(isNaN(dt)) return ""; return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}`; }catch(e){return "";} };
+// ISO week (matches <input type="week">)
+const weekKey = (d) => { try{ const dt=new Date(d); const t=new Date(Date.UTC(dt.getFullYear(),dt.getMonth(),dt.getDate())); t.setUTCDate(t.getUTCDate()+4-(t.getUTCDay()||7)); const ys=new Date(Date.UTC(t.getUTCFullYear(),0,1)); const wk=Math.ceil(((t-ys)/864e5+1)/7); return `${t.getUTCFullYear()}-W${String(wk).padStart(2,"0")}`; }catch(e){return "";} };
+const isoWeekDates = (week) => { try{ const m=week.match(/^(\d{4})-W(\d{1,2})$/); if(!m) return []; const y=+m[1], w=+m[2]; const simple=new Date(Date.UTC(y,0,1+(w-1)*7)); const dow=simple.getUTCDay()||7; simple.setUTCDate(simple.getUTCDate()-dow+1); return Array.from({length:7},(_,i)=>{ const d=new Date(simple); d.setUTCDate(d.getUTCDate()+i); return d.toISOString().split("T")[0]; }); }catch(e){return [];} };
+const uid = () => `u_${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
+const csvEsc = (c) => `"${String(c===undefined||c===null?"":c).replace(/"/g,'""')}"`;
+const toCSV = (rows) => rows.map(r=>r.map(csvEsc).join(",")).join("\r\n");
+const downloadCSV = (filename, csv) => { const blob=new Blob(["﻿"+csv],{type:"text/csv;charset=utf-8"}); const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=filename; document.body.appendChild(a); a.click(); document.body.removeChild(a); setTimeout(()=>URL.revokeObjectURL(a.href),5000); };
+
+// ───────────── STYLES ─────────────
+const C = { bg:"#080c18", card:"#0f1520", border:"#1a2035", text:"#e2e8f0", sub:"#64748b", blue:"#38bdf8", green:"#22c55e", red:"#ef4444", amber:"#f59e0b", purple:"#a78bfa" };
+const s = {
+  app:{fontFamily:"'DM Sans',system-ui,sans-serif",background:C.bg,minHeight:"100vh",color:C.text},
+  sb:{width:230,background:C.card,borderRight:`1px solid ${C.border}`,display:"flex",flexDirection:"column",position:"fixed",top:0,left:0,height:"100vh",zIndex:100,overflow:"hidden"},
+  main:{marginLeft:230,padding:"28px 32px",minHeight:"100vh"},
+  logo:{padding:"20px 18px 14px",borderBottom:`1px solid ${C.border}`},
+  navItem:(a)=>({display:"flex",alignItems:"center",gap:9,padding:"9px 18px",cursor:"pointer",fontSize:12.5,fontWeight:a?600:400,color:a?C.blue:C.sub,background:a?"rgba(56,189,248,0.07)":"transparent",borderLeft:a?`2px solid ${C.blue}`:"2px solid transparent",transition:"all 0.12s"}),
+  navSection:{padding:"12px 18px 4px",fontSize:10,fontWeight:700,color:"#2d3a52",textTransform:"uppercase",letterSpacing:"0.1em"},
+  card:(border=C.border)=>({background:C.card,border:`1px solid ${border}`,borderRadius:10,padding:"18px 22px",marginBottom:18}),
+  kpiGrid:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(155px,1fr))",gap:14,marginBottom:18},
+  kpi:(col)=>({background:C.card,border:`1px solid ${col}22`,borderRadius:10,padding:"16px 18px",borderTop:`3px solid ${col}`}),
+  kpiVal:{fontSize:26,fontWeight:700,color:C.text,lineHeight:1.1},
+  kpiLbl:{fontSize:11.5,color:C.sub,marginTop:5},
+  kpiSub:(col)=>({fontSize:11,color:col,marginTop:3,fontWeight:500}),
+  tbl:{width:"100%",borderCollapse:"collapse",fontSize:12.5},
+  th:{padding:"9px 12px",textAlign:"left",borderBottom:`1px solid ${C.border}`,color:C.sub,fontSize:10.5,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em"},
+  td:{padding:"10px 12px",borderBottom:"1px solid #0d1220",color:C.text,verticalAlign:"middle"},
+  inp:{background:"#080c18",border:`1px solid ${C.border}`,borderRadius:7,padding:"8px 11px",color:C.text,fontSize:12.5,outline:"none",width:"100%",boxSizing:"border-box"},
+  sel:{background:"#080c18",border:`1px solid ${C.border}`,borderRadius:7,padding:"8px 11px",color:C.text,fontSize:12.5,outline:"none",width:"100%",cursor:"pointer",boxSizing:"border-box"},
+  btn:(v="primary")=>({padding:"8px 18px",borderRadius:7,fontSize:12.5,fontWeight:600,cursor:"pointer",border:"none",transition:"opacity 0.15s",
+    background:v==="primary"?C.blue:v==="danger"?C.red:v==="success"?C.green:v==="amber"?C.amber:"#1a2035",
+    color:v==="ghost"?C.sub:"#050810"}),
+  lbl:{fontSize:11.5,color:C.sub,marginBottom:5,display:"block",fontWeight:500},
+  fr:{marginBottom:13},
+  g2:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16},
+  alert:(col)=>({background:`${col}11`,border:`1px solid ${col}33`,borderRadius:7,padding:"10px 14px",fontSize:12.5,color:col,marginBottom:14}),
+  badge:(col,bg)=>({display:"inline-flex",alignItems:"center",padding:"2px 9px",borderRadius:20,fontSize:11,fontWeight:600,color:col,background:bg}),
+  tab:(a)=>({padding:"7px 16px",borderRadius:7,fontSize:12.5,fontWeight:a?600:400,cursor:"pointer",border:"none",background:a?C.blue:"transparent",color:a?"#050810":C.sub,transition:"all 0.12s"}),
+  pgTitle:{fontSize:21,fontWeight:700,color:"#f1f5f9",marginBottom:3,letterSpacing:"-0.4px"},
+  pgSub:{fontSize:12.5,color:C.sub,marginBottom:22},
+  ctitle:{fontSize:11,fontWeight:700,color:C.sub,textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:14},
+};
+
+// ───────────── MICRO COMPONENTS ─────────────
+const Badge = ({text=""})=>{
+  const t=String(text);
+  if(t.includes("✅")||t.includes("Approved")||t.includes("SAFE")||t.includes("🟢")||t.includes("OK")) return <span style={s.badge(C.green,C.green+"18")}>{t}</span>;
+  if(t.includes("❌")||t.includes("Rejected")||t.includes("CRITICAL")||t.includes("🔴")||t.includes("HIGH")||t.includes("Departed")) return <span style={s.badge(C.red,C.red+"18")}>{t}</span>;
+  if(t.includes("⚠")||t.includes("🟠")||t.includes("Monitor")||t.includes("TIGHT")||t.includes("Notice")) return <span style={s.badge(C.amber,C.amber+"18")}>{t}</span>;
+  return <span style={s.badge(C.sub,"#1a2035")}>{t}</span>;
+};
+const KPI = ({label,value,sub,color=C.blue})=>(
+  <div style={s.kpi(color)}>
+    <div style={s.kpiVal}>{value}</div>
+    <div style={s.kpiLbl}>{label}</div>
+    {sub?<div style={s.kpiSub(color)}>{sub}</div>:null}
+  </div>
+);
+const Tabs = ({tabs,active,onChange})=>(
+  <div style={{display:"flex",gap:6,marginBottom:18,flexWrap:"wrap"}}>
+    {tabs.map(t=><button key={t.id} style={s.tab(active===t.id)} onClick={()=>onChange(t.id)}>{t.label}</button>)}
+  </div>
+);
+const Field = ({label,children})=><div style={s.fr}><label style={s.lbl}>{label}</label>{children}</div>;
+const Input = ({style,...props})=><input style={{...s.inp,...(style||{})}} {...props}/>;
+const Select = ({children,style,...props})=><select style={{...s.sel,...(style||{})}} {...props}>{children}</select>;
+const Btn = ({variant="primary",children,style,...props})=><button style={{...s.btn(variant),...(style||{})}} {...props}>{children}</button>;
+const SectionTitle = ({children})=><div style={s.ctitle}>{children}</div>;
+
+// ───────────── DAY-OFF AUTO-APPROVAL ENGINE ─────────────
+function evalDayOff(req, all) {
+  const isEmergency = (req.type||"").toLowerCase()==="emergency";
+  const isSick = (req.type||"").toLowerCase()==="sick";
+  if(isEmergency){
+    const mo=monthKey(req.dayoffDate||req.requestDate);
+    const cnt=all.filter(r=>(r.agentName||"").toLowerCase()===(req.agentName||"").toLowerCase()&&(r.team||"").toLowerCase()===(req.team||"").toLowerCase()&&(r.type||"").toLowerCase()==="emergency"&&monthKey(r.dayoffDate||r.requestDate)===mo&&r.id!==req.id).length;
+    if(cnt>=2) return {approval:"Rejected",status:"❌ Rejected - Emergency limit (2/month)"};
+    return {approval:"Approved",status:"✅ Approved - Emergency"};
+  }
+  if(isSick) return {approval:"Approved",status:"✅ Approved - Sick"};
+  const adv=diffDays(req.requestDate,req.dayoffDate);
+  if(adv<3) return {approval:"Rejected",status:"❌ Rejected - Need 3 days advance"};
+  const sameDay=all.filter(r=>(r.team||"").toLowerCase()===(req.team||"").toLowerCase()&&r.dayoffDate===req.dayoffDate&&r.approval!=="Rejected"&&r.id!==req.id).length;
+  if(sameDay>=2) return {approval:"Rejected",status:"❌ Rejected - Team day-off limit (2/day)"};
+  return {approval:"Approved",status:"✅ Approved"};
+}
+
+// ───────────── LOGIN ─────────────
+function Login({onLogin}){
+  const [name,setName]=useState(""); const [pass,setPass]=useState(""); const [err,setErr]=useState("");
+  const handle=()=>{
+    const users=LS.get("ko_users",DEFAULT_USERS);
+    const u=users.find(x=>x.name.toLowerCase()===name.trim().toLowerCase()&&x.password===pass&&x.active!==false);
+    if(u) onLogin(u); else setErr("Invalid credentials. Check username and password.");
+  };
+  return(
+    <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'DM Sans',system-ui,sans-serif"}}>
+      <div style={{width:380,maxWidth:"92vw"}}>
+        <div style={{textAlign:"center",marginBottom:28}}>
+          <div style={{fontSize:36,marginBottom:8}}>⚡</div>
+          <div style={{fontSize:24,fontWeight:700,color:"#f1f5f9",letterSpacing:"-1px"}}>Kamal Control</div>
+          <div style={{fontSize:12,color:C.sub,marginTop:3}}>Operations Control Platform v{VERSION}</div>
+        </div>
+        <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"28px 26px"}}>
+          {err?<div style={s.alert(C.red)}>{err}</div>:null}
+          <Field label="Username"><Input placeholder="e.g. Kamal" value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handle()}/></Field>
+          <Field label="Password"><Input type="password" placeholder="Password" value={pass} onChange={e=>setPass(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handle()}/></Field>
+          <Btn style={{width:"100%",padding:"10px"}} onClick={handle}>Sign In →</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ───────────── CONFIG (CEO) ─────────────
+function ConfigPage({activeCampaign,setActiveCampaign}){
+  const cfgKey=cKey(activeCampaign,"config");
+  const [cfg,setCfg]=useState(()=>LS.get(cfgKey,DEFAULT_CONFIG()));
+  const [campaigns,setCampaigns]=useState(()=>LS.get("ko_campaigns",DEFAULT_CAMPAIGNS));
+  const [newCampaign,setNewCampaign]=useState("");
+  const [tab,setTab]=useState("global");
+  const [saved,setSaved]=useState(false);
+  const save=()=>{ LS.set(cfgKey,cfg); setSaved(true); setTimeout(()=>setSaved(false),2000); };
+  const updateTeam=(i,field,val)=>{ const teams=[...cfg.teams]; teams[i]={...teams[i],[field]:field==="name"?val:(parseInt(val)||0)}; setCfg({...cfg,teams}); };
+  const addTeam=()=>setCfg({...cfg,teams:[...cfg.teams,{name:"New Team",required:10,buffer:0}]});
+  const removeTeam=(i)=>{ if(!window.confirm(`Remove team "${cfg.teams[i].name}" from config?`)) return; setCfg({...cfg,teams:cfg.teams.filter((_,j)=>j!==i)}); };
+  const addCampaign=()=>{
+    if(!newCampaign.trim()) return;
+    const id="c_"+Date.now();
+    const updated=[...campaigns,{id,name:newCampaign.trim(),createdAt:new Date().toISOString()}];
+    setCampaigns(updated); LS.set("ko_campaigns",updated);
+    LS.set(cKey(id,"config"),DEFAULT_CONFIG([{name:"Team 1",required:10,buffer:0}]));
+    setNewCampaign("");
+  };
+  const removeCampaign=(id)=>{
+    if(id==="ssdi") return;
+    if(!window.confirm("Delete this campaign and ALL its data (hourly, day-offs, unplanned, HR, config)? This cannot be undone.")) return;
+    const updated=campaigns.filter(c=>c.id!==id);
+    setCampaigns(updated); LS.set("ko_campaigns",updated);
+    ["config","dayoff","unplanned","hr"].forEach(sfx=>LS.remove(cKey(id,sfx)));
+    // remove all per-day hourly records for this campaign known on this device
+    try{ const pre=`ko_hourly_${id}_`; const ks=[]; for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(k&&k.indexOf(pre)===0) ks.push(k); } ks.forEach(k=>LS.remove(k)); }catch(e){}
+    if(activeCampaign===id) setActiveCampaign("ssdi");
+  };
+  const totalRequired=cfg.teams.reduce((a,t)=>a+(t.required||0),0);
+  const totalBuffer=cfg.teams.reduce((a,t)=>a+(t.buffer||0),0);
+  return(
+    <div>
+      <div style={s.pgTitle}>⚙️ Configuration</div>
+      <div style={s.pgSub}>CEO-only — All stats and KPIs are driven from these settings</div>
+      <Tabs tabs={[{id:"global",label:"🌐 Global Targets"},{id:"teams",label:"👥 Team Allocation"},{id:"campaigns",label:"📁 Campaigns"}]} active={tab} onChange={setTab}/>
+      {tab==="global"&&(
+        <div style={s.card()}>
+          <SectionTitle>Operational Targets</SectionTitle>
+          <div style={s.g2}>
+            <Field label="Total Headcount Budget (This Campaign)"><Input type="number" value={cfg.totalBudget} onChange={e=>setCfg({...cfg,totalBudget:parseInt(e.target.value)||0})}/></Field>
+            <Field label="Fill Rate Target % (for OK/WARNING/CRITICAL flags)"><Input type="number" step="0.1" value={cfg.fillRateTarget} onChange={e=>setCfg({...cfg,fillRateTarget:parseFloat(e.target.value)||0})}/></Field>
+            <Field label="Ideal Shrinkage % — Minimum"><Input type="number" step="0.1" value={cfg.shrinkageMin} onChange={e=>setCfg({...cfg,shrinkageMin:parseFloat(e.target.value)||0})}/></Field>
+            <Field label="Ideal Shrinkage % — Maximum"><Input type="number" step="0.1" value={cfg.shrinkageMax} onChange={e=>setCfg({...cfg,shrinkageMax:parseFloat(e.target.value)||0})}/></Field>
+            <Field label="Standard Notice Period (days)"><Input type="number" value={cfg.noticeperiod||10} onChange={e=>setCfg({...cfg,noticeperiod:parseInt(e.target.value)||10})}/></Field>
+          </div>
+          <div style={s.alert(C.blue)}>
+            📐 Shrinkage Formula: <strong>(Budget Headcount − Avg Active Agents) / Budget Headcount × 100</strong><br/>
+            Peak agents are still tracked per hour for operational visibility. Shrinkage % is budget-based.
+          </div>
+          <Btn onClick={save}>{saved?"✓ Saved!":"Save Configuration →"}</Btn>
+        </div>
+      )}
+      {tab==="teams"&&(
+        <div>
+          <div style={s.kpiGrid}>
+            <KPI label="Total Budget" value={cfg.totalBudget} color={C.blue}/>
+            <KPI label="Total Required" value={totalRequired} color={totalRequired>cfg.totalBudget?C.red:C.green} sub={totalRequired>cfg.totalBudget?"Exceeds budget":"Within budget"}/>
+            <KPI label="Total Buffer" value={totalBuffer} color={C.amber}/>
+            <KPI label="Teams" value={cfg.teams.length} color={C.purple}/>
+          </div>
+          <div style={s.card()}>
+            <SectionTitle>Per-Team Headcount Allocation</SectionTitle>
+            <table style={s.tbl}>
+              <thead><tr><th style={s.th}>Team Name</th><th style={s.th}>Required (Active)</th><th style={s.th}>Buffer (Extra Hires)</th><th style={s.th}>Total Allocated</th><th style={s.th}></th></tr></thead>
+              <tbody>
+                {cfg.teams.map((t,i)=>(
+                  <tr key={i}>
+                    <td style={s.td}><Input value={t.name} onChange={e=>updateTeam(i,"name",e.target.value)} style={{width:160}}/></td>
+                    <td style={s.td}><Input type="number" value={t.required} onChange={e=>updateTeam(i,"required",e.target.value)} style={{width:90}}/></td>
+                    <td style={s.td}><Input type="number" value={t.buffer} onChange={e=>updateTeam(i,"buffer",e.target.value)} style={{width:90}}/></td>
+                    <td style={s.td}><strong style={{color:C.blue}}>{(t.required||0)+(t.buffer||0)}</strong></td>
+                    <td style={s.td}><Btn variant="danger" style={{padding:"4px 10px",fontSize:11}} onClick={()=>removeTeam(i)}>✕</Btn></td>
+                  </tr>
+                ))}
+                <tr style={{background:"#0a0e18"}}>
+                  <td style={{...s.td,fontWeight:700}}>TOTAL</td>
+                  <td style={{...s.td,fontWeight:700,color:totalRequired>cfg.totalBudget?C.red:C.green}}>{totalRequired}</td>
+                  <td style={{...s.td,fontWeight:700}}>{totalBuffer}</td>
+                  <td style={{...s.td,fontWeight:700,color:C.blue}}>{totalRequired+totalBuffer}</td>
+                  <td style={s.td}/>
+                </tr>
+              </tbody>
+            </table>
+            <div style={{marginTop:14,display:"flex",gap:10}}>
+              <Btn variant="ghost" onClick={addTeam}>+ Add Team</Btn>
+              <Btn onClick={save}>{saved?"✓ Saved!":"Save →"}</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+      {tab==="campaigns"&&(
+        <div style={s.card()}>
+          <SectionTitle>Manage Campaigns</SectionTitle>
+          <div style={s.alert(C.amber)}>Each campaign has completely separate hourly data, day-offs, unplanned events, and HR records. Attrition log is shared across all campaigns.</div>
+          <div style={{display:"flex",gap:10,marginBottom:18}}>
+            <Input placeholder="New campaign name..." value={newCampaign} onChange={e=>setNewCampaign(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addCampaign()} style={{maxWidth:280}}/>
+            <Btn onClick={addCampaign}>Create Campaign</Btn>
+          </div>
+          {campaigns.map(c=>(
+            <div key={c.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 14px",background:"#080c18",borderRadius:8,marginBottom:8,border:`1px solid ${C.border}`}}>
+              <div>
+                <div style={{fontSize:13,fontWeight:600,color:C.text}}>{c.name}</div>
+                <div style={{fontSize:11,color:C.sub}}>Created: {fmtDate(c.createdAt)}</div>
+              </div>
+              {c.id!=="ssdi"?<Btn variant="danger" style={{padding:"5px 12px",fontSize:11}} onClick={()=>removeCampaign(c.id)}>Delete</Btn>:<span style={{fontSize:11,color:C.sub}}>Default</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ───────────── USER MANAGEMENT (CEO) ─────────────
+function UserManagement(){
+  const [users,setUsers]=useState(()=>LS.get("ko_users",DEFAULT_USERS));
+  const campaigns=LS.get("ko_campaigns",DEFAULT_CAMPAIGNS);
+  const [tab,setTab]=useState("list");
+  const blankForm={name:"",role:"tl",password:"",campaignId:campaigns[0]?.id||"ssdi",team:"",active:true};
+  const [form,setForm]=useState(blankForm);
+  const [editId,setEditId]=useState(null);
+  const [search,setSearch]=useState("");
+  const [msg,setMsg]=useState("");
+  const saveUsers=(u)=>{ setUsers(u); LS.set("ko_users",u); };
+  const submit=()=>{
+    if(!form.name.trim()||!form.password){ setMsg("Name and password are required."); return; }
+    if(form.role==="tl"&&!form.team){ setMsg("Select a team for the Team Leader."); return; }
+    const dup=users.find(u=>u.name.toLowerCase()===form.name.trim().toLowerCase()&&u.id!==editId);
+    if(dup){ setMsg("A user with this name already exists."); return; }
+    if(editId){ saveUsers(users.map(u=>u.id===editId?{...u,...form,name:form.name.trim()}:u)); setEditId(null); }
+    else saveUsers([...users,{...form,name:form.name.trim(),id:uid()}]);
+    setForm(blankForm); setMsg(""); setTab("list");
+  };
+  const startEdit=(u)=>{ setForm({name:u.name,role:u.role,password:u.password,campaignId:u.campaignId||"",team:u.team||"",active:u.active!==false}); setEditId(u.id); setTab("add"); };
+  const del=(id)=>{ if(id==="u1") return; if(!window.confirm("Delete this user?")) return; saveUsers(users.filter(u=>u.id!==id)); };
+  const toggle=(id)=>{ if(id==="u1") return; saveUsers(users.map(u=>u.id===id?{...u,active:u.active===false}:u)); };
+  const allTeams=(cid)=>LS.get(cKey(cid||"ssdi","config"),DEFAULT_CONFIG()).teams.map(t=>t.name);
+  const filtered=users.filter(u=>!search||u.name.toLowerCase().includes(search.toLowerCase())||(u.team||"").toLowerCase().includes(search.toLowerCase()));
+  return(
+    <div>
+      <div style={s.pgTitle}>👤 User Management</div>
+      <div style={s.pgSub}>CEO-only — Create and manage all credentials</div>
+      <Tabs tabs={[{id:"list",label:"👥 All Users"},{id:"add",label:editId?"✏️ Edit User":"➕ New User"}]} active={tab} onChange={t=>{ setTab(t); setMsg(""); if(t==="add"&&!editId) setForm(blankForm); if(t==="list") setEditId(null); }}/>
+      {tab==="list"&&(
+        <div style={s.card()}>
+          <div style={{display:"flex",gap:10,marginBottom:14}}>
+            <Input placeholder="Search users..." value={search} onChange={e=>setSearch(e.target.value)} style={{maxWidth:220}}/>
+            <span style={{fontSize:12,color:C.sub,alignSelf:"center"}}>{filtered.length} users</span>
+          </div>
+          <table style={s.tbl}>
+            <thead><tr><th style={s.th}>Name</th><th style={s.th}>Role</th><th style={s.th}>Campaign</th><th style={s.th}>Team</th><th style={s.th}>Status</th><th style={s.th}>Actions</th></tr></thead>
+            <tbody>{filtered.map(u=>(
+              <tr key={u.id}>
+                <td style={s.td}><strong>{u.name}</strong>{u.id==="u1"?<span style={{fontSize:10,color:C.amber,marginLeft:6}}>👑</span>:null}</td>
+                <td style={s.td}><span style={{fontSize:11,padding:"2px 8px",borderRadius:20,background:u.role==="ceo"?C.amber+"18":C.blue+"18",color:u.role==="ceo"?C.amber:C.blue}}>{(u.role||"").toUpperCase()}</span></td>
+                <td style={s.td}>{campaigns.find(c=>c.id===u.campaignId)?.name||"All"}</td>
+                <td style={s.td}>{u.team||"—"}</td>
+                <td style={s.td}><Badge text={u.active!==false?"🟢 Active":"🔴 Inactive"}/></td>
+                <td style={s.td}>
+                  <div style={{display:"flex",gap:6}}>
+                    <Btn variant="ghost" style={{padding:"4px 10px",fontSize:11}} onClick={()=>startEdit(u)}>Edit</Btn>
+                    {u.id!=="u1"?<Btn variant="ghost" style={{padding:"4px 10px",fontSize:11}} onClick={()=>toggle(u.id)}>{u.active!==false?"Disable":"Enable"}</Btn>:null}
+                    {u.id!=="u1"?<Btn variant="danger" style={{padding:"4px 10px",fontSize:11}} onClick={()=>del(u.id)}>Del</Btn>:null}
+                  </div>
+                </td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+      {tab==="add"&&(
+        <div style={s.card()}>
+          <SectionTitle>{editId?"Edit User":"Create New User"}</SectionTitle>
+          {msg?<div style={s.alert(C.red)}>{msg}</div>:null}
+          <div style={s.g2}>
+            <Field label="Full Name"><Input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="e.g. TL Ahmed"/></Field>
+            <Field label="Password"><Input value={form.password} onChange={e=>setForm({...form,password:e.target.value})} placeholder="Set password"/></Field>
+            <Field label="Role">
+              <Select value={form.role} onChange={e=>setForm({...form,role:e.target.value,team:e.target.value==="ceo"?"":form.team,campaignId:e.target.value==="ceo"?"":(form.campaignId||campaigns[0]?.id)})}>
+                <option value="tl">Team Leader (TL)</option>
+                <option value="manager">Manager</option>
+                <option value="ceo">CEO / Admin</option>
+              </Select>
+            </Field>
+            <Field label="Campaign">
+              <Select value={form.campaignId||""} onChange={e=>setForm({...form,campaignId:e.target.value,team:""})}>
+                <option value="">All Campaigns (CEO/Manager)</option>
+                {campaigns.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+              </Select>
+            </Field>
+            {form.campaignId&&form.role==="tl"?(
+              <Field label="Assigned Team">
+                <Select value={form.team} onChange={e=>setForm({...form,team:e.target.value})}>
+                  <option value="">Select team...</option>
+                  {allTeams(form.campaignId).map(t=><option key={t}>{t}</option>)}
+                </Select>
+              </Field>
+            ):null}
+          </div>
+          <div style={{display:"flex",gap:10}}>
+            <Btn onClick={submit}>{editId?"Save Changes →":"Create User →"}</Btn>
+            {editId?<Btn variant="ghost" onClick={()=>{ setEditId(null); setForm(blankForm); setTab("list"); }}>Cancel</Btn>:null}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ───────────── HOURLY INPUT ─────────────
+function HourlyInput({user,activeCampaign}){
+  const cfg=LS.get(cKey(activeCampaign,"config"),DEFAULT_CONFIG());
+  const isTL=user.role==="tl"&&!!user.team;
+  const [selTeam,setSelTeam]=useState(isTL?user.team:(cfg.teams[0]?.name||""));
+  const [selDate,setSelDate]=useState(todayStr());
+  const [selHour,setSelHour]=useState(HOURS[0]);
+  const team=isTL?user.team:selTeam;
+  const teamCfg=cfg.teams.find(t=>t.name===team)||{required:0,buffer:0};
+  const hKey=cKey(activeCampaign,"hourly")+"_"+selDate;   // one small record per day
+  const hourlyData=LS.get(hKey,{});
+  const key=`${selDate}|${selHour}|${team}`;
+  const cur=hourlyData[key]||{peak:"",active:"",...Object.fromEntries(SHRINK_KEYS.map(k=>[k,""]))};
+  const upd=(field,val)=>{ LS.set(hKey,{...hourlyData,[key]:{...cur,[field]:val}}); };
+  const totalShrink=SHRINK_KEYS.reduce((a,k)=>a+(parseInt(cur[k])||0),0);
+  const peakN=parseInt(cur.peak)||0, activeN=parseInt(cur.active)||0;
+  const gap=Math.max(0,peakN-activeN);
+  const fillRate=peakN>0?((activeN/peakN)*100).toFixed(1):"—";
+  const validation=peakN===0?"—":activeN+totalShrink===peakN?"✓ OK":activeN+totalShrink>peakN?"⚠ Overcount":"⚠ Undercount";
+  const submittedToday=HOURS.filter(h=>{ const d=hourlyData[`${selDate}|${h}|${team}`]; return d&&(d.peak!==""||d.active!==""); }).length;
+  const budget=teamCfg.required||0;
+  const todayActives=HOURS.map(h=>{ const d=hourlyData[`${selDate}|${h}|${team}`]; return d&&(d.peak!==""||d.active!=="")?(parseInt(d.active)||0):null; }).filter(v=>v!==null);
+  const avgActive=todayActives.length>0?(todayActives.reduce((a,b)=>a+b,0)/todayActives.length).toFixed(1):null;
+  const budgetShrinkage=avgActive!==null&&budget>0?(((budget-parseFloat(avgActive))/budget)*100).toFixed(1):null;
+  return(
+    <div>
+      <div style={s.pgTitle}>⏱ Hourly Input</div>
+      <div style={s.pgSub}>Team: <strong style={{color:C.blue}}>{team||"—"}</strong> — Budget: <strong style={{color:C.amber}}>{budget}</strong> agents</div>
+      <div style={s.kpiGrid}>
+        <KPI label="Hours Submitted Today" value={`${submittedToday}/10`} color={submittedToday===10?C.green:C.amber}/>
+        <KPI label="Fill Rate This Hour" value={fillRate!=="—"?`${fillRate}%`:"—"} color={fillRate!=="—"&&parseFloat(fillRate)>=(cfg.fillRateTarget||FILL_TARGET_DEFAULT)?C.green:C.red} sub={`Target ≥${cfg.fillRateTarget||FILL_TARGET_DEFAULT}%`}/>
+        <KPI label="Gap This Hour" value={gap} color={gap===0?C.green:gap<=3?C.amber:C.red} sub="Peak − Active"/>
+        <KPI label="Budget Shrinkage Today" value={budgetShrinkage!==null?`${budgetShrinkage}%`:"—"} color={budgetShrinkage!==null&&parseFloat(budgetShrinkage)<=(cfg.shrinkageMax||12.8)?C.green:C.red} sub={`Ideal: ${cfg.shrinkageMin||8.25}–${cfg.shrinkageMax||12.8}%`}/>
+      </div>
+      <div style={s.card()}>
+        <div style={{display:"flex",gap:14,marginBottom:18,flexWrap:"wrap"}}>
+          {!isTL?<div style={{flex:1,minWidth:150}}><Field label="Team"><Select value={selTeam} onChange={e=>setSelTeam(e.target.value)}>{cfg.teams.map(t=><option key={t.name}>{t.name}</option>)}</Select></Field></div>:null}
+          <div style={{flex:1,minWidth:150}}><Field label="Date"><Input type="date" value={selDate} onChange={e=>setSelDate(e.target.value)}/></Field></div>
+          <div style={{flex:1,minWidth:150}}><Field label="Hour"><Select value={selHour} onChange={e=>setSelHour(e.target.value)}>{HOURS.map(h=><option key={h}>{h}</option>)}</Select></Field></div>
+        </div>
+        <div style={s.g2}>
+          <div>
+            <SectionTitle>📊 Headcount</SectionTitle>
+            <Field label="Peak Headcount (required this hour)"><Input type="number" min="0" value={cur.peak} onChange={e=>upd("peak",e.target.value)} placeholder="Required this hour"/></Field>
+            <Field label="Active Agents (logged in + taking calls)"><Input type="number" min="0" value={cur.active} onChange={e=>upd("active",e.target.value)} placeholder="Active now"/></Field>
+            <div style={{background:"#080c18",borderRadius:8,padding:"12px 14px",marginTop:8}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:12,color:C.sub}}>Shrinkage Categories Total</span><span style={{fontSize:13,fontWeight:700,color:C.amber}}>{totalShrink}</span></div>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:12,color:C.sub}}>Gap (Peak − Active)</span><span style={{fontSize:13,fontWeight:700,color:gap===0?C.green:C.red}}>{gap}</span></div>
+              <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontSize:12,color:C.sub}}>Validation (Active + Shrinkage = Peak)</span><span style={{fontSize:12,fontWeight:600,color:validation.includes("OK")?C.green:C.amber}}>{validation}</span></div>
+            </div>
+            {avgActive!==null?<div style={{...s.alert(C.blue),marginTop:12,marginBottom:0}}>📈 Today's avg active: <strong>{avgActive}</strong> | Budget: <strong>{budget}</strong> | Budget shrinkage: <strong>{budgetShrinkage}%</strong></div>:null}
+          </div>
+          <div>
+            <SectionTitle>📉 Shrinkage Root Cause</SectionTitle>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9}}>
+              {SHRINK_KEYS.map(k=>(
+                <Field key={k} label={SHRINK_LABELS[k]}><Input type="number" min="0" value={cur[k]} onChange={e=>upd(k,e.target.value)} placeholder="0"/></Field>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style={s.card()}>
+        <SectionTitle>Hourly Progress — {team} — {fmtDate(selDate)}</SectionTitle>
+        <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+          {HOURS.map(h=>{
+            const d=hourlyData[`${selDate}|${h}|${team}`]; const done=d&&(d.peak!==""||d.active!=="");
+            const fr=done&&(parseInt(d.peak)||0)>0?(((parseInt(d.active)||0)/(parseInt(d.peak)||1))*100).toFixed(0):null;
+            return(
+              <div key={h} onClick={()=>setSelHour(h)} style={{padding:"9px 12px",borderRadius:8,border:`1px solid ${selHour===h?C.blue:done?C.green+"44":C.border}`,background:selHour===h?C.blue+"11":done?C.green+"08":"#080c18",cursor:"pointer",minWidth:82,textAlign:"center"}}>
+                <div style={{fontSize:10.5,color:C.sub}}>{h}</div>
+                {done?<div><div style={{fontSize:14,fontWeight:700,color:fr!==null&&parseFloat(fr)>=(cfg.fillRateTarget||FILL_TARGET_DEFAULT)?C.green:C.red,marginTop:2}}>{fr!==null?`${fr}%`:"·"}</div><div style={{fontSize:10,color:"#374151"}}>✓ done</div></div>:<div style={{fontSize:11,color:"#2d3a52",marginTop:6}}>—</div>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ───────────── DAY OFF CONTROL ─────────────
+function DayOffControl({user,activeCampaign,isCEO}){
+  const dKey=cKey(activeCampaign,"dayoff");
+  const cfg=LS.get(cKey(activeCampaign,"config"),DEFAULT_CONFIG());
+  const teams=[...new Set([...cfg.teams.map(t=>t.name),...(user.team?[user.team]:[])])];
+  const [reqs,setReqs]=useState(()=>LS.get(dKey,[]));
+  const [form,setForm]=useState({requestDate:todayStr(),dayoffDate:"",agentName:"",team:user.team||teams[0]||"",type:"Planned",notes:""});
+  const [tab,setTab]=useState("list");
+  const [msg,setMsg]=useState(null);
+  const [search,setSearch]=useState(""); const [fFilter,setFFilter]=useState("all");
+  const save=(r)=>{ setReqs(r); LS.set(dKey,r); };
+  const submit=()=>{
+    if(!form.agentName.trim()||!form.dayoffDate){ setMsg({col:C.red,text:"Agent name and day-off date are required."}); return; }
+    const newReq={...form,agentName:form.agentName.trim(),id:Date.now(),submittedBy:user.name,submittedAt:new Date().toISOString()};
+    const ev=evalDayOff(newReq,reqs);
+    save([...reqs,{...newReq,...ev}]);
+    setMsg({col:ev.approval==="Approved"?C.green:C.red,text:`${newReq.agentName}: ${ev.status}`});
+    setForm({requestDate:todayStr(),dayoffDate:"",agentName:"",team:user.team||teams[0]||"",type:"Planned",notes:""});
+  };
+  const del=(id)=>{ if(!window.confirm("Delete this request?")) return; save(reqs.filter(r=>r.id!==id)); };
+  const override=(id,val)=>save(reqs.map(r=>r.id===id?{...r,approval:val,status:val==="Approved"?"✅ Approved (Override)":"❌ Rejected (Override)"}:r));
+  const scope=isCEO?reqs:reqs.filter(r=>r.team===user.team);
+  const filtered=scope.filter(r=>{ const mf=fFilter==="all"||(r.approval||"").toLowerCase()===fFilter; const ms=!search||(r.agentName||"").toLowerCase().includes(search.toLowerCase())||(r.team||"").toLowerCase().includes(search.toLowerCase()); return mf&&ms; });
+  const mo=monthKey(todayStr());
+  const stats=useMemo(()=>{
+    const ap=scope.filter(r=>r.approval==="Approved"), rj=scope.filter(r=>r.approval==="Rejected");
+    const em=scope.filter(r=>(r.type||"").toLowerCase()==="emergency"), pl=scope.filter(r=>(r.type||"").toLowerCase()==="planned");
+    const teamNames=[...new Set(scope.map(r=>r.team).filter(Boolean))];
+    const perTeam=teamNames.map(t=>({team:t,total:scope.filter(r=>r.team===t).length,approved:scope.filter(r=>r.team===t&&r.approval==="Approved").length,rejected:scope.filter(r=>r.team===t&&r.approval==="Rejected").length}));
+    const thisMonth=scope.filter(r=>monthKey(r.dayoffDate||r.requestDate)===mo).length;
+    const agMap={}; scope.forEach(r=>{ if(r.agentName) agMap[r.agentName]=(agMap[r.agentName]||0)+1; });
+    const topAgents=Object.entries(agMap).sort((a,b)=>b[1]-a[1]).slice(0,5);
+    return{total:scope.length,approved:ap.length,rejected:rj.length,emergency:em.length,planned:pl.length,perTeam,thisMonth,topAgents,approvalRate:scope.length>0?((ap.length/scope.length)*100).toFixed(0):"0"};
+  },[reqs,isCEO,user.team]);
+  return(
+    <div>
+      <div style={s.pgTitle}>📅 Day Off Control</div>
+      <div style={s.pgSub}>Auto-approval engine — rules enforced automatically</div>
+      <Tabs tabs={[{id:"list",label:"📋 Requests"},{id:"submit",label:"➕ New Request"},{id:"stats",label:"📊 Analytics"}]} active={tab} onChange={setTab}/>
+      {tab==="stats"&&(
+        <div>
+          <div style={s.kpiGrid}>
+            <KPI label="Total Requests" value={stats.total} color={C.blue}/>
+            <KPI label="Approved" value={stats.approved} color={C.green} sub={`${stats.approvalRate}% approval rate`}/>
+            <KPI label="Rejected" value={stats.rejected} color={C.red}/>
+            <KPI label="This Month" value={stats.thisMonth} color={C.purple} sub={mo}/>
+            <KPI label="Emergency" value={stats.emergency} color={C.amber}/>
+            <KPI label="Planned" value={stats.planned} color={C.blue}/>
+          </div>
+          <div style={s.g2}>
+            {isCEO?<div style={s.card()}><SectionTitle>By Team</SectionTitle>
+              <table style={s.tbl}><thead><tr><th style={s.th}>Team</th><th style={s.th}>Total</th><th style={s.th}>✅</th><th style={s.th}>❌</th></tr></thead>
+              <tbody>{stats.perTeam.map(t=><tr key={t.team}><td style={s.td}><strong style={{color:C.blue}}>{t.team}</strong></td><td style={s.td}>{t.total}</td><td style={{...s.td,color:C.green}}>{t.approved}</td><td style={{...s.td,color:C.red}}>{t.rejected}</td></tr>)}</tbody></table>
+            </div>:null}
+            <div style={s.card()}><SectionTitle>Top Agents by Requests</SectionTitle>
+              {stats.topAgents.length===0?<div style={{fontSize:12.5,color:C.sub}}>No data</div>:stats.topAgents.map(([n,c],i)=><div key={n} style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:`1px solid ${C.border}`}}><span style={{fontSize:12.5}}><span style={{color:C.sub,marginRight:8}}>#{i+1}</span>{n}</span><strong style={{color:C.blue}}>{c}</strong></div>)}
+            </div>
+          </div>
+        </div>
+      )}
+      {tab==="submit"&&(
+        <div style={s.card()}>
+          <SectionTitle>New Day Off Request</SectionTitle>
+          <div style={s.alert(C.blue)}>Rules: Planned ≥3 days advance · Max 2/team/day · Emergency max 2/agent/month — enforced automatically.</div>
+          {msg?<div style={s.alert(msg.col)}>{msg.text}</div>:null}
+          <div style={s.g2}>
+            <div>
+              <Field label="Agent Name"><Input value={form.agentName} onChange={e=>setForm({...form,agentName:e.target.value})} placeholder="Full name"/></Field>
+              <Field label="Team"><Select value={form.team} onChange={e=>setForm({...form,team:e.target.value})} disabled={!!user.team&&user.role==="tl"}>{teams.map(t=><option key={t}>{t}</option>)}</Select></Field>
+              <Field label="Type"><Select value={form.type} onChange={e=>setForm({...form,type:e.target.value})}><option>Planned</option><option>Emergency</option><option>Sick</option></Select></Field>
+            </div>
+            <div>
+              <Field label="Request Date"><Input type="date" value={form.requestDate} onChange={e=>setForm({...form,requestDate:e.target.value})}/></Field>
+              <Field label="Day Off Date"><Input type="date" value={form.dayoffDate} onChange={e=>setForm({...form,dayoffDate:e.target.value})}/></Field>
+              <Field label="Notes"><Input value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})} placeholder="Reason (optional)"/></Field>
+            </div>
+          </div>
+          <Btn onClick={submit}>Submit — Auto Evaluate →</Btn>
+        </div>
+      )}
+      {tab==="list"&&(
+        <div style={s.card()}>
+          <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap"}}>
+            <Input placeholder="Search..." value={search} onChange={e=>setSearch(e.target.value)} style={{maxWidth:200}}/>
+            <Select value={fFilter} onChange={e=>setFFilter(e.target.value)} style={{maxWidth:150}}><option value="all">All</option><option value="approved">Approved</option><option value="rejected">Rejected</option></Select>
+            <span style={{fontSize:11,color:C.sub,alignSelf:"center"}}>{filtered.length} records</span>
+          </div>
+          <div style={{overflowX:"auto"}}>
+            <table style={s.tbl}>
+              <thead><tr><th style={s.th}>Agent</th><th style={s.th}>Team</th><th style={s.th}>Type</th><th style={s.th}>Request Date</th><th style={s.th}>Day Off Date</th><th style={s.th}>Status</th><th style={s.th}>Notes</th>{isCEO?<th style={s.th}>Override</th>:null}</tr></thead>
+              <tbody>{filtered.slice().reverse().map(r=>(
+                <tr key={r.id}>
+                  <td style={s.td}><strong>{r.agentName}</strong></td>
+                  <td style={s.td}><span style={{color:C.blue}}>{r.team}</span></td>
+                  <td style={s.td}><span style={{fontSize:11,padding:"2px 8px",borderRadius:20,background:r.type==="Emergency"?C.amber+"18":C.blue+"18",color:r.type==="Emergency"?C.amber:C.blue}}>{r.type}</span></td>
+                  <td style={s.td}>{fmtDate(r.requestDate)}</td>
+                  <td style={s.td}>{fmtDate(r.dayoffDate)}</td>
+                  <td style={s.td}><Badge text={r.status}/></td>
+                  <td style={{...s.td,maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:11,color:C.sub}}>{r.notes||"—"}</td>
+                  {isCEO?<td style={s.td}><div style={{display:"flex",gap:5}}><Btn variant="success" style={{padding:"3px 9px",fontSize:11}} onClick={()=>override(r.id,"Approved")}>✓</Btn><Btn variant="danger" style={{padding:"3px 9px",fontSize:11}} onClick={()=>override(r.id,"Rejected")}>✗</Btn><Btn variant="ghost" style={{padding:"3px 9px",fontSize:11}} onClick={()=>del(r.id)}>🗑</Btn></div></td>:null}
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ───────────── UNPLANNED TRACKER ─────────────
+function UnplannedTracker({user,activeCampaign,isCEO}){
+  const uKey=cKey(activeCampaign,"unplanned");
+  const cfg=LS.get(cKey(activeCampaign,"config"),DEFAULT_CONFIG());
+  const teams=[...new Set([...cfg.teams.map(t=>t.name),...(user.team?[user.team]:[])])];
+  const [events,setEvents]=useState(()=>LS.get(uKey,[]));
+  const [form,setForm]=useState({agentName:"",team:user.team||teams[0]||"",date:todayStr(),leaveType:"",notes:""});
+  const [tab,setTab]=useState("list");
+  const [msg,setMsg]=useState("");
+  const [search,setSearch]=useState(""); const [fTeam,setFTeam]=useState("all"); const [fMonth,setFMonth]=useState("");
+  const save=(e)=>{ setEvents(e); LS.set(uKey,e); };
+  const getRisk=(name,team,month)=>{ const cnt=events.filter(e=>(e.agentName||"").toLowerCase()===(name||"").toLowerCase()&&(e.team||"").toLowerCase()===(team||"").toLowerCase()&&monthKey(e.date)===month).length+1; return{count:cnt,risk:cnt>=4?"🔴 HIGH RISK":cnt>=2?"🟠 Monitor":"🟢 OK"}; };
+  const submit=()=>{
+    if(!form.agentName.trim()||!form.date||!form.leaveType.trim()){ setMsg("Agent, date, and event type are required."); return; }
+    const mo=monthKey(form.date); const{count,risk}=getRisk(form.agentName,form.team,mo);
+    save([...events,{...form,agentName:form.agentName.trim(),id:Date.now(),monthlyCount:count,riskStatus:risk,submittedBy:user.name,submittedAt:new Date().toISOString()}]);
+    setForm({agentName:"",team:user.team||teams[0]||"",date:todayStr(),leaveType:"",notes:""}); setMsg("");
+  };
+  const scope=isCEO?events:events.filter(e=>e.team===user.team);
+  const filtered=scope.filter(e=>{ const ms=fTeam==="all"||(e.team||"")===fTeam; const mo=!fMonth||monthKey(e.date)===fMonth; const se=!search||(e.agentName||"").toLowerCase().includes(search.toLowerCase())||(e.leaveType||"").toLowerCase().includes(search.toLowerCase()); return ms&&mo&&se; });
+  const stats=useMemo(()=>{
+    const hr=[...new Set(scope.filter(e=>(e.riskStatus||"").includes("HIGH RISK")).map(e=>`${e.agentName}|${e.team}`))].length;
+    const mo2=[...new Set(scope.filter(e=>(e.riskStatus||"").includes("Monitor")).map(e=>`${e.agentName}|${e.team}`))].length;
+    const typeMap={}; scope.forEach(e=>{ const t=(e.leaveType||"Other").split(/[,(]/)[0].trim().substring(0,25); typeMap[t]=(typeMap[t]||0)+1; });
+    const topTypes=Object.entries(typeMap).sort((a,b)=>b[1]-a[1]).slice(0,5);
+    const teamNames=[...new Set(scope.map(e=>e.team).filter(Boolean))];
+    const perTeam=teamNames.map(t=>({team:t,total:scope.filter(e=>e.team===t).length,highRisk:scope.filter(e=>e.team===t&&(e.riskStatus||"").includes("HIGH RISK")).length}));
+    const agMap={}; scope.forEach(e=>{ const k=`${e.agentName}|${e.team}`; agMap[k]=(agMap[k]||0)+1; });
+    const topAgents=Object.entries(agMap).sort((a,b)=>b[1]-a[1]).slice(0,5);
+    const monthMap={}; scope.forEach(e=>{ const m=monthKey(e.date); if(m) monthMap[m]=(monthMap[m]||0)+1; });
+    return{total:scope.length,highRisk:hr,monitor:mo2,topTypes,perTeam,topAgents,monthMap};
+  },[events,isCEO,user.team]);
+  const months=[...new Set(scope.map(e=>monthKey(e.date)).filter(Boolean))].sort().reverse();
+  return(
+    <div>
+      <div style={s.pgTitle}>⚠️ Unplanned Tracker</div>
+      <div style={s.pgSub}>Flags agents with 2+ unplanned events per month</div>
+      <Tabs tabs={[{id:"list",label:"📋 Events"},{id:"submit",label:"➕ Log Event"},{id:"stats",label:"📊 Analytics"}]} active={tab} onChange={setTab}/>
+      {tab==="stats"&&(
+        <div>
+          <div style={s.kpiGrid}>
+            <KPI label="Total Events" value={stats.total} color={C.blue}/>
+            <KPI label="🔴 High Risk Agents" value={stats.highRisk} color={C.red} sub="≥4 events/month"/>
+            <KPI label="🟠 Monitor" value={stats.monitor} color={C.amber} sub="2-3 events/month"/>
+            <KPI label="Unique Agents" value={[...new Set(scope.map(e=>e.agentName))].length} color={C.purple}/>
+          </div>
+          <div style={s.g2}>
+            <div style={s.card()}><SectionTitle>Top Repeat Offenders</SectionTitle>
+              {stats.topAgents.length===0?<div style={{fontSize:12.5,color:C.sub}}>No data</div>:stats.topAgents.map(([k,c],i)=>{ const parts=k.split("|"); return(<div key={k} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:`1px solid ${C.border}`}}><div><div style={{fontSize:12.5}}><span style={{color:C.sub,marginRight:8}}>#{i+1}</span>{parts[0]}</div><div style={{fontSize:11,color:C.blue}}>{parts[1]}</div></div><strong style={{color:c>=4?C.red:c>=2?C.amber:C.green}}>{c} events</strong></div>); })}
+            </div>
+            <div style={s.card()}><SectionTitle>Top Reasons</SectionTitle>
+              {stats.topTypes.length===0?<div style={{fontSize:12.5,color:C.sub}}>No data</div>:stats.topTypes.map(([type,cnt])=><div key={type} style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:`1px solid ${C.border}`}}><span style={{fontSize:12,color:C.sub,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{type}</span><strong style={{color:C.blue}}>{cnt}</strong></div>)}
+            </div>
+          </div>
+          {isCEO&&stats.perTeam.length>0?<div style={s.card()}><SectionTitle>By Team</SectionTitle>
+            <table style={s.tbl}><thead><tr><th style={s.th}>Team</th><th style={s.th}>Total Events</th><th style={s.th}>High Risk Agents</th></tr></thead>
+            <tbody>{stats.perTeam.map(t=><tr key={t.team}><td style={s.td}><strong style={{color:C.blue}}>{t.team}</strong></td><td style={s.td}>{t.total}</td><td style={s.td}><strong style={{color:t.highRisk>0?C.red:C.green}}>{t.highRisk}</strong></td></tr>)}</tbody></table>
+          </div>:null}
+          {Object.keys(stats.monthMap).length>0?<div style={s.card()}><SectionTitle>Monthly Trend</SectionTitle>
+            <div style={{display:"flex",gap:14,flexWrap:"wrap"}}>
+              {Object.entries(stats.monthMap).sort().map(([m,c])=><div key={m} style={{textAlign:"center",padding:"10px 14px",background:"#080c18",borderRadius:8,border:`1px solid ${C.border}`,minWidth:80}}><div style={{fontSize:18,fontWeight:700,color:C.blue}}>{c}</div><div style={{fontSize:11,color:C.sub,marginTop:2}}>{m}</div></div>)}
+            </div>
+          </div>:null}
+        </div>
+      )}
+      {tab==="submit"&&(
+        <div style={s.card()}>
+          <SectionTitle>Log Unplanned Event</SectionTitle>
+          {msg?<div style={s.alert(C.red)}>{msg}</div>:null}
+          <div style={s.g2}>
+            <div>
+              <Field label="Agent Name"><Input value={form.agentName} onChange={e=>setForm({...form,agentName:e.target.value})} placeholder="Full agent name"/></Field>
+              <Field label="Team"><Select value={form.team} onChange={e=>setForm({...form,team:e.target.value})} disabled={!!user.team&&user.role==="tl"}>{teams.map(t=><option key={t}>{t}</option>)}</Select></Field>
+              <Field label="Date"><Input type="date" value={form.date} onChange={e=>setForm({...form,date:e.target.value})}/></Field>
+            </div>
+            <div>
+              <Field label="Event Type"><Input value={form.leaveType} onChange={e=>setForm({...form,leaveType:e.target.value})} placeholder="e.g. Internet Issue, Late Login, Power Outage..."/></Field>
+              <Field label="Notes"><textarea style={{...s.inp,height:80,resize:"vertical"}} value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})} placeholder="Context..."/></Field>
+            </div>
+          </div>
+          {form.agentName&&form.date?(()=>{ const mo=monthKey(form.date); const{count,risk}=getRisk(form.agentName,form.team,mo); return<div style={s.alert(risk.includes("HIGH")?C.red:risk.includes("Monitor")?C.amber:C.green)}>Monthly count for {form.agentName}: <strong>{count}</strong> — Risk: <strong>{risk}</strong></div>; })():null}
+          <Btn onClick={submit}>Log Event →</Btn>
+        </div>
+      )}
+      {tab==="list"&&(
+        <div style={s.card()}>
+          <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap"}}>
+            <Input placeholder="Search..." value={search} onChange={e=>setSearch(e.target.value)} style={{maxWidth:180}}/>
+            {isCEO?<Select value={fTeam} onChange={e=>setFTeam(e.target.value)} style={{maxWidth:140}}><option value="all">All Teams</option>{teams.map(t=><option key={t}>{t}</option>)}</Select>:null}
+            <Select value={fMonth} onChange={e=>setFMonth(e.target.value)} style={{maxWidth:140}}><option value="">All Months</option>{months.map(m=><option key={m} value={m}>{m}</option>)}</Select>
+            <span style={{fontSize:11,color:C.sub,alignSelf:"center"}}>{filtered.length} events</span>
+          </div>
+          <div style={{overflowX:"auto"}}><table style={s.tbl}>
+            <thead><tr><th style={s.th}>Agent</th><th style={s.th}>Team</th><th style={s.th}>Date</th><th style={s.th}>Event Type</th><th style={s.th}>Count</th><th style={s.th}>Risk</th>{isCEO?<th style={s.th}>Del</th>:null}</tr></thead>
+            <tbody>{filtered.slice().reverse().map(e=><tr key={e.id}><td style={s.td}><strong>{e.agentName}</strong></td><td style={s.td}><span style={{color:C.blue}}>{e.team}</span></td><td style={s.td}>{fmtDate(e.date)}</td><td style={{...s.td,maxWidth:200,fontSize:12}}>{e.leaveType}</td><td style={s.td}><strong style={{color:e.monthlyCount>=4?C.red:e.monthlyCount>=2?C.amber:C.green}}>{e.monthlyCount}</strong></td><td style={s.td}><Badge text={e.riskStatus}/></td>{isCEO?<td style={s.td}><Btn variant="ghost" style={{padding:"3px 9px",fontSize:11}} onClick={()=>{ if(window.confirm("Delete this event?")) save(events.filter(x=>x.id!==e.id)); }}>🗑</Btn></td>:null}</tr>)}
+            </tbody>
+          </table></div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ───────────── ATTRITION LOG (GLOBAL) ─────────────
+function AttritionLog({user,isCEO}){
+  const campaigns=LS.get("ko_campaigns",DEFAULT_CAMPAIGNS);
+  const [log,setLog]=useState(()=>LS.get("ko_attrition",[]));
+  const blank={dateLogged:todayStr(),agentName:"",team:"",campaignId:user.campaignId||campaigns[0]?.id||"ssdi",departureType:"2-Week Notice",noticeDate:"",lastWorkingDay:"",reason:"",replacementHired:"No",notes:""};
+  const [form,setForm]=useState(blank);
+  const [tab,setTab]=useState("list");
+  const [msg,setMsg]=useState("");
+  const [search,setSearch]=useState(""); const [fTeam,setFTeam]=useState("all"); const [fCampaign,setFCampaign]=useState("all");
+  const saveLog=(l)=>{ setLog(l); LS.set("ko_attrition",l); };
+  const getStatus=(e)=>{ if(e.departureType==="Cancelled") return "Cancelled"; if(!e.lastWorkingDay) return "Active Notice"; return new Date(e.lastWorkingDay+"T23:59:59")<new Date()?"Departed":"Active Notice"; };
+  const submit=()=>{ if(!form.agentName.trim()){ setMsg("Agent name is required."); return; } saveLog([...log,{...form,agentName:form.agentName.trim(),id:Date.now(),submittedBy:user.name}]); setForm(blank); setMsg(""); setTab("list"); };
+  const scope=isCEO?log:log.filter(e=>e.campaignId===user.campaignId);
+  const filtered=scope.filter(e=>{ const mc=fCampaign==="all"||e.campaignId===fCampaign; const mt=fTeam==="all"||(e.team||"")===fTeam; const ms=!search||(e.agentName||"").toLowerCase().includes(search.toLowerCase())||(e.reason||"").toLowerCase().includes(search.toLowerCase()); return mc&&mt&&ms; });
+  const stats=useMemo(()=>{
+    const departed=scope.filter(e=>getStatus(e)==="Departed");
+    const onSpot=scope.filter(e=>e.departureType==="On-the-Spot");
+    const twoWk=scope.filter(e=>e.departureType==="2-Week Notice");
+    const terms=scope.filter(e=>e.departureType==="Termination");
+    const repl=scope.filter(e=>(e.replacementHired||"").toLowerCase()==="yes");
+    const perCampaign=campaigns.map(c=>({name:c.name,total:scope.filter(e=>e.campaignId===c.id).length,departed:scope.filter(e=>e.campaignId===c.id&&getStatus(e)==="Departed").length})).filter(c=>c.total>0);
+    const monthMap={}; scope.forEach(e=>{ const m=monthKey(e.dateLogged); if(m) monthMap[m]=(monthMap[m]||0)+1; });
+    const rMap={}; scope.forEach(e=>{ if(e.reason){ const r=e.reason.split(",")[0].trim().substring(0,30); rMap[r]=(rMap[r]||0)+1; } });
+    const topReasons=Object.entries(rMap).sort((a,b)=>b[1]-a[1]).slice(0,5);
+    return{total:scope.length,departed:departed.length,onSpot:onSpot.length,twoWk:twoWk.length,terms:terms.length,replRate:scope.length>0?((repl.length/scope.length)*100).toFixed(0):"0",perCampaign,monthMap,topReasons};
+  },[log,isCEO,user.campaignId]);
+  const allTeams=[...new Set(scope.map(e=>e.team).filter(Boolean))];
+  const getCfgTeams=(cid)=>LS.get(cKey(cid||"ssdi","config"),DEFAULT_CONFIG()).teams.map(t=>t.name);
+  return(
+    <div>
+      <div style={s.pgTitle}>📉 Attrition Log</div>
+      <div style={s.pgSub}>Global — tracks departures across all campaigns</div>
+      <Tabs tabs={[{id:"list",label:"📋 Log"},{id:"submit",label:"➕ Add Entry"},{id:"stats",label:"📊 Analytics"}]} active={tab} onChange={setTab}/>
+      {tab==="stats"&&(
+        <div>
+          <div style={s.kpiGrid}>
+            <KPI label="Total Attrition" value={stats.total} color={C.red}/>
+            <KPI label="Departed" value={stats.departed} color={C.red} sub={`${((stats.departed/Math.max(stats.total,1))*100).toFixed(0)}% of logged`}/>
+            <KPI label="On-the-Spot" value={stats.onSpot} color={C.amber} sub="Immediate drops"/>
+            <KPI label="2-Week Notice" value={stats.twoWk} color={C.blue}/>
+            <KPI label="Terminations" value={stats.terms} color={C.purple}/>
+            <KPI label="Replacement Rate" value={`${stats.replRate}%`} color={C.green}/>
+          </div>
+          <div style={s.g2}>
+            <div style={s.card()}><SectionTitle>Top Departure Reasons</SectionTitle>
+              {stats.topReasons.length===0?<div style={{fontSize:12.5,color:C.sub}}>No data</div>:stats.topReasons.map(([r,c])=><div key={r} style={{display:"flex",justifyContent:"space-between",padding:"7px 0",borderBottom:`1px solid ${C.border}`}}><span style={{fontSize:12,color:C.sub}}>{r}</span><strong style={{color:C.red}}>{c}</strong></div>)}
+            </div>
+            <div style={s.card()}><SectionTitle>By Campaign</SectionTitle>
+              <table style={s.tbl}><thead><tr><th style={s.th}>Campaign</th><th style={s.th}>Total</th><th style={s.th}>Departed</th></tr></thead>
+              <tbody>{stats.perCampaign.map(c=><tr key={c.name}><td style={s.td}><strong style={{color:C.blue}}>{c.name}</strong></td><td style={s.td}>{c.total}</td><td style={{...s.td,color:C.red,fontWeight:600}}>{c.departed}</td></tr>)}</tbody></table>
+            </div>
+          </div>
+          {Object.keys(stats.monthMap).length>0?<div style={s.card()}><SectionTitle>Monthly Attrition Trend</SectionTitle>
+            <div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"flex-end"}}>
+              {Object.entries(stats.monthMap).sort().map(([m,c])=>{ const mx=Math.max(...Object.values(stats.monthMap)); return(
+                <div key={m} style={{textAlign:"center",minWidth:68}}>
+                  <div style={{height:70,display:"flex",alignItems:"flex-end",justifyContent:"center",marginBottom:5}}><div style={{width:36,background:C.red,borderRadius:"3px 3px 0 0",height:`${(c/mx)*70}px`,minHeight:3}}></div></div>
+                  <div style={{fontSize:14,fontWeight:700,color:C.red}}>{c}</div>
+                  <div style={{fontSize:10,color:C.sub}}>{m}</div>
+                </div>
+              ); })}
+            </div>
+          </div>:null}
+        </div>
+      )}
+      {tab==="submit"&&(
+        <div style={s.card()}>
+          <SectionTitle>Log Departure</SectionTitle>
+          {msg?<div style={s.alert(C.red)}>{msg}</div>:null}
+          <div style={s.g2}>
+            <div>
+              <Field label="Agent Name"><Input value={form.agentName} onChange={e=>setForm({...form,agentName:e.target.value})} placeholder="Full name"/></Field>
+              <Field label="Campaign">
+                <Select value={form.campaignId} onChange={e=>setForm({...form,campaignId:e.target.value,team:""})}>
+                  {campaigns.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+                </Select>
+              </Field>
+              <Field label="Team">
+                <Select value={form.team} onChange={e=>setForm({...form,team:e.target.value})}>
+                  <option value="">Select team...</option>
+                  {getCfgTeams(form.campaignId).map(t=><option key={t}>{t}</option>)}
+                </Select>
+              </Field>
+              <Field label="Departure Type">
+                <Select value={form.departureType} onChange={e=>setForm({...form,departureType:e.target.value})}>
+                  <option>2-Week Notice</option><option>On-the-Spot</option><option>Termination</option><option>Cancelled</option>
+                </Select>
+              </Field>
+              <Field label="Replacement Hired?">
+                <Select value={form.replacementHired} onChange={e=>setForm({...form,replacementHired:e.target.value})}>
+                  <option>No</option><option>Yes</option><option>In Progress</option>
+                </Select>
+              </Field>
+            </div>
+            <div>
+              <Field label="Date Logged"><Input type="date" value={form.dateLogged} onChange={e=>setForm({...form,dateLogged:e.target.value})}/></Field>
+              <Field label="Notice Date"><Input type="date" value={form.noticeDate} onChange={e=>setForm({...form,noticeDate:e.target.value})}/></Field>
+              <Field label="Last Working Day"><Input type="date" value={form.lastWorkingDay} onChange={e=>setForm({...form,lastWorkingDay:e.target.value})}/></Field>
+              <Field label="Reason"><Input value={form.reason} onChange={e=>setForm({...form,reason:e.target.value})} placeholder="Reason for leaving"/></Field>
+              <Field label="Notes"><textarea style={{...s.inp,height:60,resize:"vertical"}} value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})}/></Field>
+            </div>
+          </div>
+          <Btn onClick={submit}>Add to Log →</Btn>
+        </div>
+      )}
+      {tab==="list"&&(
+        <div style={s.card()}>
+          <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap"}}>
+            <Input placeholder="Search..." value={search} onChange={e=>setSearch(e.target.value)} style={{maxWidth:180}}/>
+            {isCEO?<Select value={fCampaign} onChange={e=>setFCampaign(e.target.value)} style={{maxWidth:160}}><option value="all">All Campaigns</option>{campaigns.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</Select>:null}
+            <Select value={fTeam} onChange={e=>setFTeam(e.target.value)} style={{maxWidth:140}}><option value="all">All Teams</option>{allTeams.map(t=><option key={t}>{t}</option>)}</Select>
+            <span style={{fontSize:11,color:C.sub,alignSelf:"center"}}>{filtered.length} records</span>
+          </div>
+          <div style={{overflowX:"auto"}}><table style={s.tbl}>
+            <thead><tr><th style={s.th}>Agent</th><th style={s.th}>Campaign</th><th style={s.th}>Team</th><th style={s.th}>Type</th><th style={s.th}>Date</th><th style={s.th}>Last Day</th><th style={s.th}>Reason</th><th style={s.th}>Status</th><th style={s.th}>Replaced?</th>{isCEO?<th style={s.th}>Del</th>:null}</tr></thead>
+            <tbody>{filtered.slice().reverse().map(e=>{ const st=getStatus(e); return(
+              <tr key={e.id}>
+                <td style={s.td}><strong>{e.agentName}</strong></td>
+                <td style={s.td}><span style={{fontSize:11,color:C.purple}}>{campaigns.find(c=>c.id===e.campaignId)?.name||e.campaignId}</span></td>
+                <td style={s.td}><span style={{color:C.blue}}>{e.team}</span></td>
+                <td style={s.td}><span style={{fontSize:11,padding:"2px 8px",borderRadius:20,background:e.departureType==="Termination"?C.red+"18":e.departureType==="On-the-Spot"?C.amber+"18":C.blue+"18",color:e.departureType==="Termination"?C.red:e.departureType==="On-the-Spot"?C.amber:C.blue}}>{e.departureType}</span></td>
+                <td style={s.td}>{fmtDate(e.dateLogged)}</td>
+                <td style={s.td}>{fmtDate(e.lastWorkingDay)}</td>
+                <td style={{...s.td,maxWidth:150,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:11,color:C.sub}}>{e.reason||"—"}</td>
+                <td style={s.td}><Badge text={st==="Departed"?"🔴 Departed":st==="Active Notice"?"🟠 Active Notice":"Cancelled"}/></td>
+                <td style={s.td}><span style={{fontSize:11,color:e.replacementHired==="Yes"?C.green:C.sub}}>{e.replacementHired}</span></td>
+                {isCEO?<td style={s.td}><Btn variant="ghost" style={{padding:"3px 9px",fontSize:11}} onClick={()=>{ if(window.confirm("Delete this entry?")) saveLog(log.filter(x=>x.id!==e.id)); }}>🗑</Btn></td>:null}
+              </tr>
+            );})}
+            </tbody>
+          </table></div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ───────────── HR RECORDS ─────────────
+function HRRecords({user,activeCampaign,isCEO}){
+  const rKey=cKey(activeCampaign,"hr");
+  const cfg=LS.get(cKey(activeCampaign,"config"),DEFAULT_CONFIG());
+  const teams=[...new Set([...cfg.teams.map(t=>t.name),...(user.team?[user.team]:[])])];
+  const [records,setRecords]=useState(()=>LS.get(rKey,[]));
+  const blank={date:todayStr(),employee:"",team:user.team||teams[0]||"",type:"Verbal Warning",severity:"1st Time",reason:"",deduction:"",notes:""};
+  const [form,setForm]=useState(blank);
+  const [tab,setTab]=useState("list");
+  const [msg,setMsg]=useState("");
+  const [search,setSearch]=useState("");
+  const save=(r)=>{ setRecords(r); LS.set(rKey,r); };
+  const submit=()=>{ if(!form.employee.trim()){ setMsg("Employee name is required."); return; } save([...records,{...form,employee:form.employee.trim(),id:Date.now(),submittedBy:user.name}]); setForm(blank); setMsg(""); };
+  const scope=isCEO?records:records.filter(r=>r.team===user.team);
+  const filtered=scope.filter(r=>!search||(r.employee||"").toLowerCase().includes(search.toLowerCase())||(r.reason||"").toLowerCase().includes(search.toLowerCase()));
+  const stats=useMemo(()=>{
+    const byType={}; scope.forEach(r=>{ byType[r.type]=(byType[r.type]||0)+1; });
+    const deductions=scope.filter(r=>r.deduction&&r.deduction!=="0");
+    const terms=scope.filter(r=>(r.type||"").toLowerCase().includes("terminat"));
+    const agMap={}; scope.forEach(r=>{ if(r.employee) agMap[r.employee]=(agMap[r.employee]||0)+1; });
+    const topAgents=Object.entries(agMap).sort((a,b)=>b[1]-a[1]).slice(0,5);
+    return{total:scope.length,byType,deductions:deductions.length,terms:terms.length,topAgents};
+  },[records,isCEO,user.team]);
+  return(
+    <div>
+      <div style={s.pgTitle}>🗂 HR Records</div>
+      <div style={s.pgSub}>Disciplinary log — warnings, deductions, terminations</div>
+      <Tabs tabs={[{id:"list",label:"📋 Records"},{id:"submit",label:"➕ Add"},{id:"stats",label:"📊 Stats"}]} active={tab} onChange={setTab}/>
+      {tab==="stats"&&(
+        <div>
+          <div style={s.kpiGrid}><KPI label="Total Records" value={stats.total} color={C.purple}/><KPI label="Deductions" value={stats.deductions} color={C.amber}/><KPI label="Terminations" value={stats.terms} color={C.red}/></div>
+          <div style={s.g2}>
+            <div style={s.card()}><SectionTitle>By Action Type</SectionTitle>{Object.keys(stats.byType).length===0?<div style={{fontSize:12.5,color:C.sub}}>No data</div>:Object.entries(stats.byType).map(([type,cnt])=><div key={type} style={{display:"flex",justifyContent:"space-between",padding:"7px 0",borderBottom:`1px solid ${C.border}`}}><span style={{fontSize:12.5,color:C.sub}}>{type}</span><strong style={{color:C.purple}}>{cnt}</strong></div>)}</div>
+            <div style={s.card()}><SectionTitle>Most Actions</SectionTitle>{stats.topAgents.length===0?<div style={{fontSize:12.5,color:C.sub}}>No data</div>:stats.topAgents.map(([n,c],i)=><div key={n} style={{display:"flex",justifyContent:"space-between",padding:"7px 0",borderBottom:`1px solid ${C.border}`}}><span style={{fontSize:12.5}}><span style={{color:C.sub,marginRight:8}}>#{i+1}</span>{n}</span><strong style={{color:C.red}}>{c}</strong></div>)}</div>
+          </div>
+        </div>
+      )}
+      {tab==="submit"&&(
+        <div style={s.card()}><SectionTitle>Add HR Record</SectionTitle>
+          {msg?<div style={s.alert(C.red)}>{msg}</div>:null}
+          <div style={s.g2}>
+            <div>
+              <Field label="Employee"><Input value={form.employee} onChange={e=>setForm({...form,employee:e.target.value})}/></Field>
+              <Field label="Team"><Select value={form.team} onChange={e=>setForm({...form,team:e.target.value})} disabled={!!user.team&&user.role==="tl"}>{teams.map(t=><option key={t}>{t}</option>)}</Select></Field>
+              <Field label="Action Type"><Select value={form.type} onChange={e=>setForm({...form,type:e.target.value})}><option>Verbal Warning</option><option>Written Warning</option><option>Deduction</option><option>Last Warning</option><option>Termination</option><option>Disciplinary Action</option></Select></Field>
+              <Field label="Deduction ($)"><Input value={form.deduction} onChange={e=>setForm({...form,deduction:e.target.value})} placeholder="0 if none"/></Field>
+            </div>
+            <div>
+              <Field label="Date"><Input type="date" value={form.date} onChange={e=>setForm({...form,date:e.target.value})}/></Field>
+              <Field label="Severity"><Input value={form.severity} onChange={e=>setForm({...form,severity:e.target.value})} placeholder="1st Time, 2nd Time..."/></Field>
+              <Field label="Reason"><Input value={form.reason} onChange={e=>setForm({...form,reason:e.target.value})}/></Field>
+              <Field label="Notes"><textarea style={{...s.inp,height:60,resize:"vertical"}} value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})}/></Field>
+            </div>
+          </div>
+          <Btn onClick={submit}>Add Record →</Btn>
+        </div>
+      )}
+      {tab==="list"&&(
+        <div style={s.card()}>
+          <Input placeholder="Search..." value={search} onChange={e=>setSearch(e.target.value)} style={{maxWidth:220,marginBottom:14}}/>
+          <div style={{overflowX:"auto"}}><table style={s.tbl}>
+            <thead><tr><th style={s.th}>Date</th><th style={s.th}>Employee</th><th style={s.th}>Team</th><th style={s.th}>Action</th><th style={s.th}>Severity</th><th style={s.th}>Reason</th><th style={s.th}>Deduction</th>{isCEO?<th style={s.th}>Del</th>:null}</tr></thead>
+            <tbody>{filtered.slice().reverse().map(r=><tr key={r.id}><td style={s.td}>{fmtDate(r.date)}</td><td style={s.td}><strong>{r.employee}</strong></td><td style={s.td}><span style={{color:C.blue}}>{r.team}</span></td><td style={s.td}><span style={{fontSize:11,padding:"2px 8px",borderRadius:20,background:(r.type||"").includes("Terminat")?C.red+"18":(r.type||"").includes("Deduct")?C.amber+"18":C.purple+"18",color:(r.type||"").includes("Terminat")?C.red:(r.type||"").includes("Deduct")?C.amber:C.purple}}>{r.type}</span></td><td style={{...s.td,fontSize:11,color:C.sub}}>{r.severity}</td><td style={{...s.td,maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12}}>{r.reason}</td><td style={s.td}>{r.deduction?<span style={{color:C.amber,fontWeight:600}}>${r.deduction}</span>:"—"}</td>{isCEO?<td style={s.td}><Btn variant="ghost" style={{padding:"3px 9px",fontSize:11}} onClick={()=>{ if(window.confirm("Delete this record?")) save(records.filter(x=>x.id!==r.id)); }}>🗑</Btn></td>:null}</tr>)}
+            </tbody>
+          </table></div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ───────────── REPORTS ─────────────
+function Reports({user,activeCampaign,isCEO}){
+  const cfg=LS.get(cKey(activeCampaign,"config"),DEFAULT_CONFIG());
+  const teams=cfg.teams.map(t=>t.name);
+  const campaigns=LS.get("ko_campaigns",DEFAULT_CAMPAIGNS);
+  const campaignName=campaigns.find(c=>c.id===activeCampaign)?.name||activeCampaign;
+  const [reportType,setReportType]=useState("daily");
+  const [selDate,setSelDate]=useState(todayStr());
+  const [selWeek,setSelWeek]=useState(weekKey(todayStr()));
+  const [generated,setGenerated]=useState(null);
+  const dayoffData=LS.get(cKey(activeCampaign,"dayoff"),[]);
+  const unplannedData=LS.get(cKey(activeCampaign,"unplanned"),[]);
+  const attritionData=LS.get("ko_attrition",[]);
+  const fillTarget=cfg.fillRateTarget||FILL_TARGET_DEFAULT, shrinkMax=cfg.shrinkageMax||12.8, shrinkMin=cfg.shrinkageMin||8.25;
+  const buildDailyReport=(date)=>{
+    const hourlyData=LS.get(cKey(activeCampaign,"hourly")+"_"+date,{});
+    const hourlyRows=[]; const totalShrinkMap={}; SHRINK_KEYS.forEach(k=>totalShrinkMap[k]=0);
+    HOURS.forEach(h=>{
+      let tp=0,ta=0,ts=0,any=false;
+      teams.forEach(t=>{ const d=hourlyData[`${date}|${h}|${t}`]; if(d&&(d.peak!==""||d.active!=="")){ any=true; const p=parseInt(d.peak)||0,a=parseInt(d.active)||0; tp+=p; ta+=a; SHRINK_KEYS.forEach(k2=>{ const v=parseInt(d[k2])||0; ts+=v; totalShrinkMap[k2]+=v; }); } });
+      if(any&&tp>0) hourlyRows.push({hour:h,peak:tp,active:ta,shrinkage:ts,gap:tp-ta,fillRate:(ta/tp*100).toFixed(1)});
+    });
+    const teamRows=teams.map(t=>{
+      const tCfg=cfg.teams.find(x=>x.name===t)||{required:0};
+      const entries=HOURS.map(h=>hourlyData[`${date}|${h}|${t}`]).filter(d=>d&&(d.peak!==""||d.active!==""));
+      if(entries.length===0) return null;
+      const avgActive=(entries.reduce((a,d)=>a+(parseInt(d.active)||0),0)/entries.length).toFixed(1);
+      const avgPeak=(entries.reduce((a,d)=>a+(parseInt(d.peak)||0),0)/entries.length).toFixed(1);
+      const budgetShrinkage=tCfg.required>0?(((tCfg.required-parseFloat(avgActive))/tCfg.required)*100).toFixed(1):"—";
+      return{team:t,budget:tCfg.required,avgPeak,avgActive,budgetShrinkage};
+    }).filter(Boolean);
+    const allActives=hourlyRows.map(r=>r.active);
+    const avgActive=allActives.length>0?(allActives.reduce((a,b)=>a+b,0)/allActives.length).toFixed(1):"—";
+    const budget=cfg.totalBudget;
+    const budgetShrink=avgActive!=="—"&&budget>0?(((budget-parseFloat(avgActive))/budget)*100).toFixed(1):"—";
+    const avgFill=hourlyRows.length>0?(hourlyRows.reduce((a,r)=>a+parseFloat(r.fillRate),0)/hourlyRows.length).toFixed(1):"—";
+    const worstHour=hourlyRows.length>0?hourlyRows.reduce((a,b)=>a.gap>b.gap?a:b):null;
+    const dayoffToday=dayoffData.filter(r=>r.dayoffDate===date);
+    const unplannedToday=unplannedData.filter(e=>e.date===date);
+    return{date,hourlyRows,teamRows,avgActive,budget,budgetShrink,avgFill,worstHour,totalShrinkMap,dayoffToday,unplannedToday};
+  };
+  const buildWeeklyReport=(week)=>{
+    const dates=isoWeekDates(week);
+    const dailyReports=dates.map(d=>buildDailyReport(d)).filter(r=>r.hourlyRows.length>0);
+    const avgFills=dailyReports.map(r=>parseFloat(r.avgFill)).filter(v=>!isNaN(v));
+    const weekAvgFill=avgFills.length>0?(avgFills.reduce((a,b)=>a+b,0)/avgFills.length).toFixed(1):"—";
+    const weekShrinkMap={}; SHRINK_KEYS.forEach(k=>weekShrinkMap[k]=0);
+    dailyReports.forEach(r=>SHRINK_KEYS.forEach(k=>weekShrinkMap[k]+=(r.totalShrinkMap[k]||0)));
+    const weekActives=dailyReports.map(r=>parseFloat(r.avgActive)).filter(v=>!isNaN(v));
+    const weekAvgActive=weekActives.length>0?(weekActives.reduce((a,b)=>a+b,0)/weekActives.length).toFixed(1):"—";
+    const weekBudget=cfg.totalBudget;
+    const weekBudgetShrink=weekAvgActive!=="—"&&weekBudget>0?(((weekBudget-parseFloat(weekAvgActive))/weekBudget)*100).toFixed(1):"—";
+    const weekDayoff=dayoffData.filter(r=>dates.includes(r.dayoffDate));
+    const weekUnplanned=unplannedData.filter(e=>dates.includes(e.date));
+    const weekAttrition=attritionData.filter(e=>dates.includes(e.dateLogged));
+    return{week,dates,dailyReports,weekAvgFill,weekShrinkMap,weekAvgActive,weekBudget,weekBudgetShrink,weekDayoff,weekUnplanned,weekAttrition};
+  };
+  const generate=()=>{
+    if(reportType==="daily") setGenerated({type:"daily",data:buildDailyReport(selDate)});
+    else setGenerated({type:"weekly",data:buildWeeklyReport(selWeek)});
+  };
+  const downloadReport=()=>{
+    if(!generated) return;
+    const rows=[];
+    if(generated.type==="daily"){
+      const r=generated.data;
+      rows.push(["DAILY OPERATIONS REPORT"]);
+      rows.push(["Date",r.date],["Campaign",campaignName],["Budget Headcount",r.budget],["Avg Active Agents",r.avgActive],["Budget Shrinkage %",r.budgetShrink],["Avg Fill Rate %",r.avgFill],["Worst Hour",r.worstHour?`${r.worstHour.hour} (Gap ${r.worstHour.gap})`:"N/A"]);
+      rows.push([],["HOURLY BREAKDOWN"],["Hour","Peak","Active","Shrinkage","Gap","Fill Rate %"]);
+      r.hourlyRows.forEach(x=>rows.push([x.hour,x.peak,x.active,x.shrinkage,x.gap,x.fillRate]));
+      rows.push([],["TEAM BREAKDOWN"],["Team","Budget","Avg Peak","Avg Active","Budget Shrinkage %"]);
+      r.teamRows.forEach(x=>rows.push([x.team,x.budget,x.avgPeak,x.avgActive,x.budgetShrinkage]));
+      rows.push([],["SHRINKAGE ROOT CAUSE"],["Category","Total (agent-hours)"]);
+      SHRINK_KEYS.forEach(k=>rows.push([SHRINK_LABELS[k],r.totalShrinkMap[k]||0]));
+      rows.push([],["DAY-OFF ACTIVITY"],["Agent","Team","Type","Status"]);
+      r.dayoffToday.forEach(x=>rows.push([x.agentName,x.team,x.type,x.approval]));
+      rows.push([],["UNPLANNED EVENTS"],["Agent","Team","Event Type","Risk"]);
+      r.unplannedToday.forEach(x=>rows.push([x.agentName,x.team,x.leaveType,x.riskStatus]));
+      downloadCSV(`daily_report_${r.date}.csv`,toCSV(rows));
+    } else {
+      const r=generated.data;
+      rows.push(["WEEKLY OPERATIONS REPORT"]);
+      rows.push(["Week",r.week],["Campaign",campaignName],["Budget Headcount",r.weekBudget],["Week Avg Active",r.weekAvgActive],["Week Budget Shrinkage %",r.weekBudgetShrink],["Week Avg Fill Rate %",r.weekAvgFill],["Days Captured",`${r.dailyReports.length}/7`]);
+      rows.push([],["DAILY BREAKDOWN"],["Date","Avg Fill %","Avg Active","Budget Shrinkage %","Worst Hour"]);
+      r.dailyReports.forEach(d=>rows.push([d.date,d.avgFill,d.avgActive,d.budgetShrink,d.worstHour?d.worstHour.hour:"N/A"]));
+      rows.push([],["WEEKLY SHRINKAGE ROOT CAUSE"],["Category","Total (agent-hours)"]);
+      SHRINK_KEYS.forEach(k=>rows.push([SHRINK_LABELS[k],r.weekShrinkMap[k]||0]));
+      rows.push([],["DAY-OFF THIS WEEK"],["Agent","Team","Day Off Date","Type","Status"]);
+      r.weekDayoff.forEach(x=>rows.push([x.agentName,x.team,x.dayoffDate,x.type,x.approval]));
+      rows.push([],["ATTRITION THIS WEEK"],["Agent","Team","Type","Reason"]);
+      r.weekAttrition.forEach(x=>rows.push([x.agentName,x.team,x.departureType,x.reason]));
+      downloadCSV(`weekly_report_${r.week}.csv`,toCSV(rows));
+    }
+  };
+  const ShrinkBars=({map})=>{
+    const total=Object.values(map).reduce((a,b)=>a+b,0);
+    if(total===0) return <div style={{fontSize:12.5,color:C.sub}}>No shrinkage data</div>;
+    return <div>{SHRINK_KEYS.filter(k=>map[k]>0).map(k=>(
+      <div key={k} style={{marginBottom:9}}>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}><span style={{fontSize:12,color:C.sub}}>{SHRINK_LABELS[k]}</span><span style={{fontSize:12,color:C.text}}>{map[k]} ({(map[k]/total*100).toFixed(0)}%)</span></div>
+        <div style={{background:"#080c18",borderRadius:3,height:5}}><div style={{background:k==="nsnc"||k==="isp"?C.red:k==="emergency"?C.amber:C.blue,height:"100%",borderRadius:3,width:`${map[k]/total*100}%`}}></div></div>
+      </div>
+    ))}</div>;
+  };
+  const DailyView=({data:r})=>(
+    <div>
+      <div style={s.kpiGrid}>
+        <KPI label="Avg Fill Rate" value={r.avgFill!=="—"?`${r.avgFill}%`:"—"} color={r.avgFill!=="—"&&parseFloat(r.avgFill)>=fillTarget?C.green:C.red} sub={`Target ≥${fillTarget}%`}/>
+        <KPI label="Budget Headcount" value={r.budget} color={C.blue}/>
+        <KPI label="Avg Active Agents" value={r.avgActive} color={C.green}/>
+        <KPI label="Budget Shrinkage" value={r.budgetShrink!=="—"?`${r.budgetShrink}%`:"—"} color={r.budgetShrink!=="—"&&parseFloat(r.budgetShrink)<=shrinkMax?C.green:C.red} sub={`Ideal: ${shrinkMin}–${shrinkMax}%`}/>
+        <KPI label="Hours Captured" value={`${r.hourlyRows.length}/10`} color={r.hourlyRows.length===10?C.green:C.amber}/>
+        <KPI label="Worst Hour" value={r.worstHour?r.worstHour.hour:"N/A"} color={C.amber} sub={r.worstHour?`Gap: ${r.worstHour.gap}`:""}/>
+      </div>
+      {r.hourlyRows.length===0?<div style={s.alert(C.amber)}>No hourly data submitted for {fmtDate(r.date)} in this campaign.</div>:(
+        <div style={s.g2}>
+          <div style={s.card()}>
+            <SectionTitle>Hourly Breakdown</SectionTitle>
+            <table style={s.tbl}><thead><tr><th style={s.th}>Hour</th><th style={s.th}>Peak</th><th style={s.th}>Active</th><th style={s.th}>Gap</th><th style={s.th}>Fill %</th></tr></thead>
+            <tbody>{r.hourlyRows.map(x=><tr key={x.hour}><td style={s.td}>{x.hour}</td><td style={s.td}>{x.peak}</td><td style={s.td}>{x.active}</td><td style={s.td}><strong style={{color:x.gap===0?C.green:x.gap<=5?C.amber:C.red}}>{x.gap}</strong></td><td style={s.td}><strong style={{color:parseFloat(x.fillRate)>=fillTarget?C.green:C.red}}>{x.fillRate}%</strong></td></tr>)}</tbody></table>
+          </div>
+          <div style={s.card()}>
+            <SectionTitle>Team Breakdown (Budget Shrinkage)</SectionTitle>
+            <table style={s.tbl}><thead><tr><th style={s.th}>Team</th><th style={s.th}>Budget</th><th style={s.th}>Avg Peak</th><th style={s.th}>Avg Active</th><th style={s.th}>Shrinkage%</th></tr></thead>
+            <tbody>{r.teamRows.map(x=><tr key={x.team}><td style={s.td}><strong style={{color:C.blue}}>{x.team}</strong></td><td style={s.td}>{x.budget}</td><td style={s.td}>{x.avgPeak}</td><td style={s.td}>{x.avgActive}</td><td style={s.td}><strong style={{color:x.budgetShrinkage!=="—"&&parseFloat(x.budgetShrinkage)<=shrinkMax?C.green:C.red}}>{x.budgetShrinkage!=="—"?`${x.budgetShrinkage}%`:"—"}</strong></td></tr>)}</tbody></table>
+          </div>
+        </div>
+      )}
+      <div style={s.g2}>
+        <div style={s.card()}><SectionTitle>Shrinkage Root Cause</SectionTitle><ShrinkBars map={r.totalShrinkMap}/></div>
+        <div style={s.card()}>
+          <SectionTitle>Day-Off Activity ({r.dayoffToday.length})</SectionTitle>
+          {r.dayoffToday.length===0?<div style={{fontSize:12,color:C.sub}}>None on this date</div>:<table style={s.tbl}><thead><tr><th style={s.th}>Agent</th><th style={s.th}>Team</th><th style={s.th}>Type</th><th style={s.th}>Status</th></tr></thead><tbody>{r.dayoffToday.map(x=><tr key={x.id}><td style={s.td}>{x.agentName}</td><td style={s.td}>{x.team}</td><td style={s.td}>{x.type}</td><td style={s.td}><Badge text={x.status}/></td></tr>)}</tbody></table>}
+        </div>
+      </div>
+      {r.unplannedToday.length>0?<div style={s.card()}><SectionTitle>Unplanned Events ({r.unplannedToday.length})</SectionTitle><table style={s.tbl}><thead><tr><th style={s.th}>Agent</th><th style={s.th}>Team</th><th style={s.th}>Event</th><th style={s.th}>Risk</th></tr></thead><tbody>{r.unplannedToday.map(x=><tr key={x.id}><td style={s.td}>{x.agentName}</td><td style={s.td}>{x.team}</td><td style={s.td}>{x.leaveType}</td><td style={s.td}><Badge text={x.riskStatus}/></td></tr>)}</tbody></table></div>:null}
+    </div>
+  );
+  const WeeklyView=({data:r})=>(
+    <div>
+      <div style={s.kpiGrid}>
+        <KPI label="Week Avg Fill Rate" value={r.weekAvgFill!=="—"?`${r.weekAvgFill}%`:"—"} color={r.weekAvgFill!=="—"&&parseFloat(r.weekAvgFill)>=fillTarget?C.green:C.red}/>
+        <KPI label="Week Budget" value={r.weekBudget} color={C.blue}/>
+        <KPI label="Week Avg Active" value={r.weekAvgActive} color={C.green}/>
+        <KPI label="Week Budget Shrinkage" value={r.weekBudgetShrink!=="—"?`${r.weekBudgetShrink}%`:"—"} color={r.weekBudgetShrink!=="—"&&parseFloat(r.weekBudgetShrink)<=shrinkMax?C.green:C.red}/>
+        <KPI label="Days Captured" value={`${r.dailyReports.length}/7`} color={r.dailyReports.length>=5?C.green:C.amber}/>
+        <KPI label="Day-Off This Week" value={r.weekDayoff.length} color={C.purple}/>
+      </div>
+      {r.dailyReports.length===0?<div style={s.alert(C.amber)}>No hourly data submitted during week {r.week} in this campaign.</div>:(
+        <div style={s.card()}>
+          <SectionTitle>Day-by-Day Summary</SectionTitle>
+          <table style={s.tbl}><thead><tr><th style={s.th}>Date</th><th style={s.th}>Avg Fill %</th><th style={s.th}>Avg Active</th><th style={s.th}>Budget Shrinkage</th><th style={s.th}>Worst Hour</th><th style={s.th}>Hours Captured</th></tr></thead>
+          <tbody>{r.dailyReports.map(d=><tr key={d.date}><td style={s.td}>{fmtDate(d.date)}</td><td style={s.td}><strong style={{color:parseFloat(d.avgFill)>=fillTarget?C.green:C.red}}>{d.avgFill}%</strong></td><td style={s.td}>{d.avgActive}</td><td style={s.td}>{d.budgetShrink}%</td><td style={s.td}>{d.worstHour?d.worstHour.hour:"—"}</td><td style={s.td}>{d.hourlyRows.length}/10</td></tr>)}</tbody></table>
+        </div>
+      )}
+      <div style={s.g2}>
+        <div style={s.card()}><SectionTitle>Weekly Shrinkage Root Cause</SectionTitle><ShrinkBars map={r.weekShrinkMap}/></div>
+        <div style={s.card()}><SectionTitle>Day-Off This Week ({r.weekDayoff.length})</SectionTitle>
+          {r.weekDayoff.length===0?<div style={{fontSize:12,color:C.sub}}>None</div>:<table style={s.tbl}><thead><tr><th style={s.th}>Agent</th><th style={s.th}>Date</th><th style={s.th}>Status</th></tr></thead><tbody>{r.weekDayoff.slice(0,10).map(x=><tr key={x.id}><td style={s.td}>{x.agentName}</td><td style={s.td}>{fmtDate(x.dayoffDate)}</td><td style={s.td}><Badge text={x.status}/></td></tr>)}</tbody></table>}
+        </div>
+      </div>
+      {r.weekAttrition.length>0?<div style={s.card()}><SectionTitle>Attrition This Week ({r.weekAttrition.length})</SectionTitle><table style={s.tbl}><thead><tr><th style={s.th}>Agent</th><th style={s.th}>Team</th><th style={s.th}>Type</th><th style={s.th}>Reason</th></tr></thead><tbody>{r.weekAttrition.map(x=><tr key={x.id}><td style={s.td}>{x.agentName}</td><td style={s.td}>{x.team}</td><td style={s.td}>{x.departureType}</td><td style={{...s.td,fontSize:11,color:C.sub}}>{x.reason}</td></tr>)}</tbody></table></div>:null}
+    </div>
+  );
+  return(
+    <div>
+      <div style={s.pgTitle}>📋 Reports</div>
+      <div style={s.pgSub}>Daily and weekly operations reports for <strong style={{color:C.blue}}>{campaignName}</strong> — view by date, download as CSV</div>
+      <div style={s.card()}>
+        <div style={{display:"flex",gap:12,alignItems:"flex-end",flexWrap:"wrap"}}>
+          <div>
+            <label style={s.lbl}>Report Type</label>
+            <div style={{display:"flex",gap:6}}>
+              <button style={s.tab(reportType==="daily")} onClick={()=>{setReportType("daily");setGenerated(null);}}>📅 Daily</button>
+              <button style={s.tab(reportType==="weekly")} onClick={()=>{setReportType("weekly");setGenerated(null);}}>📊 Weekly</button>
+            </div>
+          </div>
+          {reportType==="daily"?<div style={{flex:1,minWidth:160}}><Field label="Select Date"><Input type="date" value={selDate} onChange={e=>setSelDate(e.target.value)}/></Field></div>:null}
+          {reportType==="weekly"?<div style={{flex:1,minWidth:160}}><Field label="Select Week"><Input type="week" value={selWeek} onChange={e=>setSelWeek(e.target.value)}/></Field></div>:null}
+          <Btn onClick={generate} style={{marginBottom:13}}>Generate Report →</Btn>
+          {generated?<Btn variant="success" onClick={downloadReport} style={{marginBottom:13}}>⬇ Download CSV</Btn>:null}
+        </div>
+      </div>
+      {generated&&generated.type==="daily"?<DailyView data={generated.data}/>:null}
+      {generated&&generated.type==="weekly"?<WeeklyView data={generated.data}/>:null}
+      {!generated?<div style={s.alert(C.blue)}>Select a date/week and click "Generate Report" to view and download the report.</div>:null}
+    </div>
+  );
+}
+
+// ───────────── CEO DASHBOARD ─────────────
+function CEODashboard({activeCampaign}){
+  const cfg=LS.get(cKey(activeCampaign,"config"),DEFAULT_CONFIG());
+  const teams=cfg.teams;
+  const date=todayStr();
+  const hourlyData=LS.get(cKey(activeCampaign,"hourly")+"_"+date,{});
+  const unplannedData=LS.get(cKey(activeCampaign,"unplanned"),[]);
+  const attritionData=LS.get("ko_attrition",[]);
+  const fillTarget=cfg.fillRateTarget||FILL_TARGET_DEFAULT, shrinkMax=cfg.shrinkageMax||12.8, shrinkMin=cfg.shrinkageMin||8.25;
+  const hourlyRows=[]; const shrinkTotals={}; SHRINK_KEYS.forEach(k=>shrinkTotals[k]=0);
+  HOURS.forEach(h=>{ let tp=0,ta=0,ts=0,any=false; teams.forEach(t=>{ const d=hourlyData[`${date}|${h}|${t.name}`]; if(d&&(d.peak!==""||d.active!=="")){ any=true; tp+=parseInt(d.peak)||0; ta+=parseInt(d.active)||0; SHRINK_KEYS.forEach(k2=>{ const v=parseInt(d[k2])||0; ts+=v; shrinkTotals[k2]+=v; }); } }); if(any&&tp>0) hourlyRows.push({hour:h,peak:tp,active:ta,shrinkage:ts,gap:tp-ta,fillRate:(ta/tp*100).toFixed(1)}); });
+  const avgFill=hourlyRows.length>0?(hourlyRows.reduce((a,r)=>a+parseFloat(r.fillRate),0)/hourlyRows.length).toFixed(1):"—";
+  const allActives=hourlyRows.map(r=>r.active);
+  const avgActive=allActives.length>0?(allActives.reduce((a,b)=>a+b,0)/allActives.length).toFixed(1):"—";
+  const budget=cfg.totalBudget;
+  const budgetShrink=avgActive!=="—"&&budget>0?(((budget-parseFloat(avgActive))/budget)*100).toFixed(1):"—";
+  const totalGap=hourlyRows.reduce((a,r)=>a+r.gap,0);
+  const worstHour=hourlyRows.length>0?hourlyRows.reduce((a,b)=>a.gap>b.gap?a:b):null;
+  const highRisk=[...new Set(unplannedData.filter(e=>(e.riskStatus||"").includes("HIGH RISK")).map(e=>e.agentName))].length;
+  const activeNotices=attritionData.filter(e=>e.departureType!=="Cancelled"&&(!e.lastWorkingDay||new Date(e.lastWorkingDay+"T23:59:59")>=new Date())).length;
+  const mo=monthKey(date);
+  const monthAttrition=attritionData.filter(e=>monthKey(e.dateLogged)===mo).length;
+  const teamStats=teams.map(t=>{
+    const entries=HOURS.map(h=>hourlyData[`${date}|${h}|${t.name}`]).filter(d=>d&&(d.peak!==""||d.active!==""));
+    if(entries.length===0) return{...t,avgActive:"—",avgPeak:"—",budgetShrinkage:"—",risk:"—"};
+    const avgAct=(entries.reduce((a,d)=>a+(parseInt(d.active)||0),0)/entries.length).toFixed(1);
+    const avgPk=(entries.reduce((a,d)=>a+(parseInt(d.peak)||0),0)/entries.length).toFixed(1);
+    const bshrink=t.required>0?(((t.required-parseFloat(avgAct))/t.required)*100).toFixed(1):"—";
+    const risk=bshrink==="—"?"—":parseFloat(bshrink)>shrinkMax?"🔴 HIGH":parseFloat(bshrink)<0?"🟠 OVER BUDGET":"🟢 OK";
+    return{...t,avgActive:avgAct,avgPeak:avgPk,budgetShrinkage:bshrink,risk};
+  });
+  return(
+    <div>
+      <div style={s.pgTitle}>⚡ Executive Dashboard</div>
+      <div style={s.pgSub}>{new Date().toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"long",year:"numeric"})} — Live operations view</div>
+      <div style={s.kpiGrid}>
+        <KPI label="Budget Shrinkage Today" value={budgetShrink!=="—"?`${budgetShrink}%`:"—"} color={budgetShrink!=="—"&&parseFloat(budgetShrink)<=shrinkMax?C.green:C.red} sub={`Ideal: ${shrinkMin}–${shrinkMax}%`}/>
+        <KPI label="Avg Fill Rate Today" value={avgFill!=="—"?`${avgFill}%`:"—"} color={avgFill!=="—"&&parseFloat(avgFill)>=fillTarget?C.green:C.red} sub={`Target ≥${fillTarget}%`}/>
+        <KPI label="Avg Active Agents" value={avgActive} color={C.blue} sub={`Budget: ${budget}`}/>
+        <KPI label="Total Gap Today" value={totalGap} color={totalGap===0?C.green:totalGap<=20?C.amber:C.red}/>
+        <KPI label="Worst Hour" value={worstHour?worstHour.hour:"—"} color={C.amber} sub={worstHour?`Gap: ${worstHour.gap}`:"No data yet"}/>
+        <KPI label="🔴 High Risk Agents" value={highRisk} color={C.red} sub="Unplanned tracker"/>
+        <KPI label="Active Notices" value={activeNotices} color={C.amber} sub="Pending departures"/>
+        <KPI label="This Month Attrition" value={monthAttrition} color={C.purple} sub={mo}/>
+      </div>
+      {hourlyRows.length===0?<div style={s.alert(C.amber)}>⏸ No hourly data submitted for today yet in this campaign.</div>:null}
+      <div style={s.g2}>
+        <div style={s.card()}>
+          <SectionTitle>Hourly Fill Rate — Today</SectionTitle>
+          {hourlyRows.length===0?<div style={{color:C.sub,fontSize:12.5}}>No data</div>:hourlyRows.map(r=>(
+            <div key={r.hour} style={{marginBottom:9}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                <span style={{fontSize:12,color:C.sub}}>{r.hour}</span>
+                <div style={{display:"flex",gap:10}}><span style={{fontSize:11.5,color:C.sub}}>Active: {r.active} / Peak: {r.peak}</span><strong style={{fontSize:12,color:parseFloat(r.fillRate)>=fillTarget?C.green:C.red}}>{r.fillRate}%</strong></div>
+              </div>
+              <div style={{background:"#080c18",borderRadius:4,height:6}}><div style={{background:parseFloat(r.fillRate)>=fillTarget?C.green:C.red,borderRadius:4,height:"100%",width:`${Math.min(100,parseFloat(r.fillRate))}%`}}></div></div>
+            </div>
+          ))}
+        </div>
+        <div style={s.card()}>
+          <SectionTitle>Team Staffing — Budget Shrinkage</SectionTitle>
+          <table style={s.tbl}>
+            <thead><tr><th style={s.th}>Team</th><th style={s.th}>Budget</th><th style={s.th}>Avg Peak</th><th style={s.th}>Avg Active</th><th style={s.th}>Shrinkage%</th><th style={s.th}>Status</th></tr></thead>
+            <tbody>{teamStats.map(t=><tr key={t.name}><td style={s.td}><strong style={{color:C.blue}}>{t.name}</strong></td><td style={s.td}>{t.required}</td><td style={s.td}>{t.avgPeak}</td><td style={s.td}>{t.avgActive}</td><td style={s.td}><strong style={{color:t.budgetShrinkage==="—"?C.sub:parseFloat(t.budgetShrinkage)<=shrinkMax?C.green:C.red}}>{t.budgetShrinkage!=="—"?`${t.budgetShrinkage}%`:"—"}</strong></td><td style={s.td}>{t.risk!=="—"?<Badge text={t.risk}/>:"—"}</td></tr>)}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div style={s.g2}>
+        <div style={s.card()}>
+          <SectionTitle>Today's Shrinkage Root Cause</SectionTitle>
+          {Object.values(shrinkTotals).every(v=>v===0)?<div style={{color:C.sub,fontSize:12.5}}>No data yet</div>:SHRINK_KEYS.filter(k=>shrinkTotals[k]>0).map(k=>{ const v=shrinkTotals[k]; const total=Object.values(shrinkTotals).reduce((a,b)=>a+b,0)||1; return(<div key={k} style={{marginBottom:9}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}><span style={{fontSize:12,color:C.sub}}>{SHRINK_LABELS[k]}</span><span style={{fontSize:12}}>{v} ({(v/total*100).toFixed(0)}%)</span></div><div style={{background:"#080c18",borderRadius:3,height:5}}><div style={{background:k==="nsnc"||k==="isp"?C.red:k==="emergency"?C.amber:C.blue,height:"100%",borderRadius:3,width:`${v/total*100}%`}}></div></div></div>); })}
+        </div>
+        <div style={s.card()}>
+          <SectionTitle>Hourly Summary Table</SectionTitle>
+          {hourlyRows.length===0?<div style={{color:C.sub,fontSize:12.5}}>No data</div>:
+          <table style={s.tbl}><thead><tr><th style={s.th}>Hour</th><th style={s.th}>Peak</th><th style={s.th}>Active</th><th style={s.th}>Gap</th><th style={s.th}>Fill%</th></tr></thead>
+          <tbody>
+            {hourlyRows.map(r=><tr key={r.hour}><td style={s.td}>{r.hour}</td><td style={s.td}>{r.peak}</td><td style={s.td}>{r.active}</td><td style={s.td}><strong style={{color:r.gap===0?C.green:r.gap<=5?C.amber:C.red}}>{r.gap}</strong></td><td style={s.td}><strong style={{color:parseFloat(r.fillRate)>=fillTarget?C.green:C.red}}>{r.fillRate}%</strong></td></tr>)}
+            <tr style={{background:"#080c18"}}><td style={{...s.td,fontWeight:700}}>TOTAL</td><td style={{...s.td,fontWeight:700}}>{hourlyRows.reduce((a,r)=>a+r.peak,0)}</td><td style={{...s.td,fontWeight:700}}>{hourlyRows.reduce((a,r)=>a+r.active,0)}</td><td style={{...s.td,fontWeight:700,color:C.amber}}>{totalGap}</td><td style={{...s.td,fontWeight:700,color:avgFill!=="—"&&parseFloat(avgFill)>=fillTarget?C.green:C.red}}>{avgFill!=="—"?`${avgFill}%`:"—"}</td></tr>
+          </tbody></table>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ───────────── TL DASHBOARD ─────────────
+function TLDashboard({user,activeCampaign}){
+  const cfg=LS.get(cKey(activeCampaign,"config"),DEFAULT_CONFIG());
+  const teamCfg=cfg.teams.find(t=>t.name===user.team)||{required:0};
+  const date=todayStr();
+  const hourlyData=LS.get(cKey(activeCampaign,"hourly")+"_"+date,{});
+  const fillTarget=cfg.fillRateTarget||FILL_TARGET_DEFAULT, shrinkMax=cfg.shrinkageMax||12.8, shrinkMin=cfg.shrinkageMin||8.25;
+  const entries=HOURS.map(h=>({h,d:hourlyData[`${date}|${h}|${user.team}`]})).filter(x=>x.d&&(x.d.peak!==""||x.d.active!==""));
+  const submitted=entries.length;
+  const avgActive=entries.length>0?(entries.reduce((a,x)=>a+(parseInt(x.d.active)||0),0)/entries.length).toFixed(1):"—";
+  const budget=teamCfg.required||0;
+  const budgetShrink=avgActive!=="—"&&budget>0?(((budget-parseFloat(avgActive))/budget)*100).toFixed(1):"—";
+  const todayRows=entries.map(({h,d})=>{ const p=parseInt(d.peak)||0,a=parseInt(d.active)||0,sh=SHRINK_KEYS.reduce((acc,k2)=>acc+(parseInt(d[k2])||0),0); return{hour:h,peak:p,active:a,gap:Math.max(0,p-a),fillRate:p>0?((a/p)*100).toFixed(1):"—",validation:p===0?"—":a+sh===p?"✓ OK":a+sh>p?"⚠ Overcount":"⚠ Undercount"}; });
+  return(
+    <div>
+      <div style={s.pgTitle}>👋 Welcome, {user.name}</div>
+      <div style={s.pgSub}>Team: <strong style={{color:C.blue}}>{user.team}</strong> — {new Date().toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"long"})}</div>
+      <div style={s.kpiGrid}>
+        <KPI label="Hours Submitted" value={`${submitted}/10`} color={submitted===10?C.green:C.amber} sub={submitted===10?"Complete":"Pending"}/>
+        <KPI label="Budget (Headcount)" value={budget} color={C.blue} sub="Your team allocation"/>
+        <KPI label="Avg Active Today" value={avgActive} color={C.green}/>
+        <KPI label="Budget Shrinkage" value={budgetShrink!=="—"?`${budgetShrink}%`:"—"} color={budgetShrink!=="—"&&parseFloat(budgetShrink)<=shrinkMax?C.green:C.red} sub={`Ideal: ${shrinkMin}–${shrinkMax}%`}/>
+      </div>
+      {submitted<10?<div style={s.alert(C.amber)}>⏰ {10-submitted} hours still pending for today — go to Hourly Input.</div>:null}
+      {todayRows.length>0?<div style={s.card()}><SectionTitle>Today's Summary — {user.team}</SectionTitle>
+        <table style={s.tbl}><thead><tr><th style={s.th}>Hour</th><th style={s.th}>Peak</th><th style={s.th}>Active</th><th style={s.th}>Gap</th><th style={s.th}>Fill%</th><th style={s.th}>Validation</th></tr></thead>
+        <tbody>{todayRows.map(r=><tr key={r.hour}><td style={s.td}>{r.hour}</td><td style={s.td}>{r.peak}</td><td style={s.td}>{r.active}</td><td style={s.td}><strong style={{color:r.gap===0?C.green:r.gap<=3?C.amber:C.red}}>{r.gap}</strong></td><td style={s.td}><strong style={{color:r.fillRate!=="—"&&parseFloat(r.fillRate)>=fillTarget?C.green:C.red}}>{r.fillRate!=="—"?`${r.fillRate}%`:"—"}</strong></td><td style={s.td}><span style={{fontSize:11,color:r.validation.includes("OK")?C.green:C.amber}}>{r.validation}</span></td></tr>)}</tbody></table>
+      </div>:null}
+    </div>
+  );
+}
+
+// ───────────── MAIN APP ─────────────
+function SyncBadge(){
+  const [,setT]=useState(0);
+  useEffect(()=>{ const f=()=>setT(t=>t+1); window.addEventListener("ko-status",f); return ()=>window.removeEventListener("ko-status",f); },[]);
+  const st=SYNC.status;
+  const col=st==="online"?C.green:st==="connecting"?C.amber:C.red;
+  const txt=st==="online"?"Live — shared database":st==="connecting"?"Connecting...":"Offline — will retry";
+  return <div style={{display:"flex",alignItems:"center",gap:6,padding:"7px 18px",fontSize:10.5,color:col}}><span style={{width:7,height:7,borderRadius:"50%",background:col,display:"inline-block"}}></span>{txt}</div>;
+}
+function Splash(){
+  return <div style={{minHeight:"100vh",background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,fontFamily:"'DM Sans',system-ui,sans-serif"}}>
+    <div style={{fontSize:34}}>⚡</div>
+    <div style={{fontSize:16,fontWeight:700,color:"#f1f5f9"}}>Kamal Control</div>
+    <div style={{fontSize:12,color:C.sub}}>Connecting to shared database...</div>
+  </div>;
+}
+function App(){
+  const [booted,setBooted]=useState(false);
+  const [user,setUser]=useState(null);
+  const [page,setPage]=useState("dashboard");
+  const [activeCampaign,setActiveCampaign]=useState("ssdi");
+  const [dataV,setDataV]=useState(0);
+  const [,setTick]=useState(0);
+  useEffect(()=>{ const f=()=>setTick(t=>t+1); window.addEventListener("ko-sync",f); return ()=>window.removeEventListener("ko-sync",f); },[]);
+  useEffect(()=>{ const f=()=>setDataV(v=>v+1); window.addEventListener("ko-remote",f); return ()=>window.removeEventListener("ko-remote",f); },[]);
+  useEffect(()=>{
+    bootSync().then(()=>{
+      if(LS.get("ko_campaigns",null)===null) LS.set("ko_campaigns",DEFAULT_CAMPAIGNS);
+      if(LS.get("ko_users",null)===null) LS.set("ko_users",DEFAULT_USERS);
+      if(LS.get(cKey("ssdi","config"),null)===null) LS.set(cKey("ssdi","config"),DEFAULT_CONFIG());
+      const sess=LS.get("ko_session",null);
+      if(sess){ const users=LS.get("ko_users",DEFAULT_USERS); const u=users.find(x=>x.id===sess.id&&x.active!==false); if(u) setUser(u); }
+      setActiveCampaign(LS.get("ko_active_campaign","ssdi"));
+      setBooted(true);
+    });
+  },[]);
+  const isCEO=user?.role==="ceo"||user?.role==="manager";
+  const campaigns=LS.get("ko_campaigns",DEFAULT_CAMPAIGNS);
+  const activeCampaignName=campaigns.find(c=>c.id===activeCampaign)?.name||activeCampaign;
+  useEffect(()=>{ if(user&&user.role==="tl"&&user.campaignId) setActiveCampaign(user.campaignId); },[user]);
+  useEffect(()=>{ if(!campaigns.find(c=>c.id===activeCampaign)) setActiveCampaign(campaigns[0]?.id||"ssdi"); },[campaigns.map(c=>c.id).join("|"),activeCampaign]);
+  useEffect(()=>{ try{ localStorage.setItem("ko_active_campaign",JSON.stringify(activeCampaign)); }catch(e){} },[activeCampaign]);
+  const login=(u)=>{ setUser(u); LS.set("ko_session",{id:u.id}); setPage("dashboard"); };
+  const logout=()=>{ setUser(null); LS.remove("ko_session"); setPage("dashboard"); };
+  const ceoNav=[
+    {section:"Overview"},
+    {id:"dashboard",icon:"⚡",label:"Dashboard"},
+    {id:"reports",icon:"📋",label:"Reports"},
+    {section:"Operations"},
+    {id:"hourly",icon:"⏱",label:"Hourly Input"},
+    {id:"dayoff",icon:"📅",label:"Day Off Control"},
+    {id:"unplanned",icon:"⚠️",label:"Unplanned Tracker"},
+    {id:"attrition",icon:"📉",label:"Attrition Log"},
+    {id:"hr",icon:"🗂",label:"HR Records"},
+    {section:"Admin"},
+    {id:"config",icon:"⚙️",label:"Configuration"},
+    {id:"users",icon:"👤",label:"User Management"},
+  ];
+  const tlNav=[
+    {id:"dashboard",icon:"🏠",label:"My Dashboard"},
+    {id:"hourly",icon:"⏱",label:"Hourly Input"},
+    {id:"dayoff",icon:"📅",label:"Day Off Requests"},
+    {id:"unplanned",icon:"⚠️",label:"Unplanned Events"},
+    {id:"attrition",icon:"📉",label:"Attrition Log"},
+    {id:"hr",icon:"🗂",label:"HR Records"},
+    {id:"reports",icon:"📋",label:"Reports"},
+  ];
+  const nav=isCEO?ceoNav:tlNav;
+  if(!booted) return <Splash/>;
+  if(!user) return <Login onLogin={login}/>;
+  const ck=activeCampaign+":"+dataV;
+  return(
+    <div style={s.app}>
+      <div style={s.sb}>
+        <div style={s.logo}>
+          <div style={{fontSize:17,fontWeight:700,color:"#f1f5f9",letterSpacing:"-0.5px"}}>⚡ Kamal Control</div>
+          <div style={{fontSize:10.5,color:C.sub,marginTop:2}}>v{VERSION} · {activeCampaignName}</div>
+        </div>
+        <div style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}`}}>
+          <div style={{background:"#080c18",borderRadius:7,padding:"9px 11px",display:"flex",alignItems:"center",gap:9}}>
+            <div style={{width:30,height:30,borderRadius:"50%",background:isCEO?C.amber+"11":C.blue+"11",border:`1px solid ${isCEO?C.amber:C.blue}33`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,flexShrink:0}}>{isCEO?"👑":"👤"}</div>
+            <div style={{overflow:"hidden"}}>
+              <div style={{fontSize:12,fontWeight:600,color:"#f1f5f9",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{user.name}</div>
+              <div style={{fontSize:10,color:isCEO?C.amber:C.blue}}>{isCEO?(user.role==="manager"?"Manager":"CEO / Admin"):`TL — ${user.team}`}</div>
+            </div>
+          </div>
+        </div>
+        {isCEO&&campaigns.length>1?(
+          <div style={{padding:"8px 14px",borderBottom:`1px solid ${C.border}`}}>
+            <div style={{fontSize:10,color:C.sub,marginBottom:5,textTransform:"uppercase",letterSpacing:"0.08em",fontWeight:700}}>Campaign</div>
+            <Select value={activeCampaign} onChange={e=>setActiveCampaign(e.target.value)} style={{fontSize:11.5,padding:"5px 9px"}}>{campaigns.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</Select>
+          </div>
+        ):null}
+        <div style={{flex:1,overflowY:"auto",paddingBottom:8}}>
+          {nav.map((n,i)=>n.section?<div key={`s${i}`} style={s.navSection}>{n.section}</div>:<div key={n.id} style={s.navItem(page===n.id)} onClick={()=>setPage(n.id)}><span style={{fontSize:14}}>{n.icon}</span><span>{n.label}</span></div>)}
+        </div>
+        <SyncBadge/>
+        <div style={{padding:"0 14px 12px"}}>
+          <Btn variant="ghost" style={{width:"100%",padding:"8px",fontSize:12}} onClick={logout}>Sign Out</Btn>
+        </div>
+      </div>
+      <div style={s.main}>
+        {page==="dashboard"&&(isCEO?<CEODashboard key={ck} activeCampaign={activeCampaign}/>:<TLDashboard key={ck} user={user} activeCampaign={activeCampaign}/>)}
+        {page==="hourly"&&<HourlyInput key={ck} user={user} activeCampaign={activeCampaign}/>}
+        {page==="dayoff"&&<DayOffControl key={ck} user={user} activeCampaign={activeCampaign} isCEO={isCEO}/>}
+        {page==="unplanned"&&<UnplannedTracker key={ck} user={user} activeCampaign={activeCampaign} isCEO={isCEO}/>}
+        {page==="attrition"&&<AttritionLog key={"a"+dataV} user={user} isCEO={isCEO}/>}
+        {page==="hr"&&<HRRecords key={ck} user={user} activeCampaign={activeCampaign} isCEO={isCEO}/>}
+        {page==="reports"&&<Reports key={ck} user={user} activeCampaign={activeCampaign} isCEO={isCEO}/>}
+        {page==="config"&&(isCEO?<ConfigPage key={ck} activeCampaign={activeCampaign} setActiveCampaign={setActiveCampaign}/>:<div style={s.alert(C.red)}>🚫 Access denied. CEO only.</div>)}
+        {page==="users"&&(isCEO?<UserManagement key={"u"+dataV}/>:<div style={s.alert(C.red)}>🚫 Access denied. CEO only.</div>)}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+// build: v2.1 cloud-sync
+
+</script>
+</body>
+</html>
