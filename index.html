@@ -132,8 +132,8 @@ async function pullAll(initial){
 function bootSync(){
   try{ for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(k&&k.indexOf("ko_")===0){ try{ cache[k]=JSON.parse(localStorage.getItem(k)); }catch(e){} } } }catch(e){}
   const first = Promise.race([ pullAll(true), new Promise(res=>setTimeout(res, 8000)) ]);
-  setInterval(()=>{var _ae=document.activeElement;var _ed=_ae&&((/^(INPUT|TEXTAREA|SELECT)$/.test(_ae.tagName))||_ae.isContentEditable);if(!_ed)pullAll(false);}, 10000);
-  window.addEventListener("focus", ()=>pullAll(false));
+  window.__kcAct=Date.now();["keydown","mousedown","input","change","focusin","touchstart","pointerdown"].forEach(function(ev){document.addEventListener(ev,function(){window.__kcAct=Date.now();},true);});window.__kcIdle=function(){return (Date.now()-(window.__kcAct||0))>20000;};setInterval(function(){if(window.__kcIdle())pullAll(false);}, 10000);
+  window.addEventListener("focus", ()=>{ if(window.__kcIdle&&window.__kcIdle())pullAll(false); });
   return first;
 }
 
