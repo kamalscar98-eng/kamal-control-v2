@@ -220,21 +220,21 @@ function SubmitMeeting({campaign, teams, user, perms}){
     <div className="card">
       <div className="grid3">
         <div><label>Team *</label><select value={team} onChange={e=>{setTeam(e.target.value);setForm(f=>({...f,agentName:''}));}} disabled={scopeTeams.length<=1}>{scopeTeams.map(t=><option key={t}>{t}</option>)}</select></div>
-        <div><label>Agent *</label><select value={form.agentName} onChange={e=>setForm({...form,agentName:e.target.value})}><option value="">— select —</option>{agents.map(a=><option key={a.id}>{a.name}</option>)}</select></div>
-        <div><label>Date *</label><input type="date" max={todayISO()} value={form.date} onChange={e=>setForm({...form,date:e.target.value})}/></div>
-        <div><label>Activity type *</label><select value={form.type} onChange={e=>setForm({...form,type:e.target.value})}>{ACTIVITY_TYPES.map(t=><option key={t}>{t}</option>)}</select></div>
-        <div><label>Channel</label><select value={form.channel} onChange={e=>setForm({...form,channel:e.target.value})}>{CHANNELS.map(t=><option key={t}>{t}</option>)}</select></div>
-        <div><label>Duration (min)</label><input type="number" min="0" value={form.durationMin} onChange={e=>setForm({...form,durationMin:e.target.value})}/></div>
-        <div><label>Reason / trigger</label><select value={form.reason} onChange={e=>setForm({...form,reason:e.target.value})}>{REASONS.map(t=><option key={t}>{t}</option>)}</select></div>
-        <div><label>Performance / KPI ref</label><input value={form.kpiRef} onChange={e=>setForm({...form,kpiRef:e.target.value})} placeholder="e.g. transfers, QA 82%"/></div>
-        <div><label>Main theme</label><select value={form.theme} onChange={e=>setForm({...form,theme:e.target.value})}>{THEMES.map(t=><option key={t}>{t}</option>)}</select></div>
+        <div><label>Agent *</label><select value={form.agentName} onChange={e=>setForm(f=>({...f,agentName:e.target.value}))}><option value="">— select —</option>{agents.map(a=><option key={a.id}>{a.name}</option>)}</select></div>
+        <div><label>Date *</label><input type="date" max={todayISO()} value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))}/></div>
+        <div><label>Activity type *</label><select value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))}>{ACTIVITY_TYPES.map(t=><option key={t}>{t}</option>)}</select></div>
+        <div><label>Channel</label><select value={form.channel} onChange={e=>setForm(f=>({...f,channel:e.target.value}))}>{CHANNELS.map(t=><option key={t}>{t}</option>)}</select></div>
+        <div><label>Duration (min)</label><input type="number" min="0" value={form.durationMin} onChange={e=>setForm(f=>({...f,durationMin:e.target.value}))}/></div>
+        <div><label>Reason / trigger</label><select value={form.reason} onChange={e=>setForm(f=>({...f,reason:e.target.value}))}>{REASONS.map(t=><option key={t}>{t}</option>)}</select></div>
+        <div><label>Performance / KPI ref</label><input value={form.kpiRef} onChange={e=>setForm(f=>({...f,kpiRef:e.target.value}))} placeholder="e.g. transfers, QA 82%"/></div>
+        <div><label>Main theme</label><select value={form.theme} onChange={e=>setForm(f=>({...f,theme:e.target.value}))}>{THEMES.map(t=><option key={t}>{t}</option>)}</select></div>
       </div>
       <label>Feedback / coaching notes</label>
-      <textarea value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})} placeholder="What was discussed / coached…"/>
+      <textarea value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} placeholder="What was discussed / coached…"/>
       <div className="grid3">
-        <div><label>Incident?</label><select value={form.incident} onChange={e=>setForm({...form,incident:e.target.value})}><option>No</option><option>Yes</option></select></div>
-        <div><label>Follow-up</label><select value={form.followup} onChange={e=>setForm({...form,followup:e.target.value})}>{FOLLOWUP.map(t=><option key={t}>{t}</option>)}</select></div>
-        <div><label>Action taken</label><input value={form.action} onChange={e=>setForm({...form,action:e.target.value})}/></div>
+        <div><label>Incident?</label><select value={form.incident} onChange={e=>setForm(f=>({...f,incident:e.target.value}))}><option>No</option><option>Yes</option></select></div>
+        <div><label>Follow-up</label><select value={form.followup} onChange={e=>setForm(f=>({...f,followup:e.target.value}))}>{FOLLOWUP.map(t=><option key={t}>{t}</option>)}</select></div>
+        <div><label>Action taken</label><input value={form.action} onChange={e=>setForm(f=>({...f,action:e.target.value}))}/></div>
       </div>
       <div style={{marginTop:14,display:'flex',gap:10,alignItems:'center'}}>
         <button onClick={submit} disabled={busy}>{busy?'Saving…':'Submit'}</button>
