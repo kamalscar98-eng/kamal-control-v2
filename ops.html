@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Kamal Control — Ops Add-on</title>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js" crossorigin></script>
+<script src="https://unpkg.com/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<style>
+:root{--bg:#0b1220;--panel:#111a2e;--panel2:#0e1626;--line:#22304d;--txt:#e7ecf5;--mut:#93a1bd;--accent:#4f7cff;--accent2:#2e5496;--good:#1f9d57;--goodbg:#0f2e1f;--warn:#b7791f;--warnbg:#2e2410;--bad:#c0392b;--badbg:#2e1414;--chip:#1a2540;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.45 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+a{color:var(--accent)}
+.app{display:flex;min-height:100vh}
+.side{width:238px;flex:0 0 238px;background:linear-gradient(180deg,#0c1424,#0a1120);border-right:1px solid var(--line);padding:14px 10px;position:sticky;top:0;height:100vh;overflow:auto}
+.brand{font-weight:800;font-size:16px;padding:6px 8px 2px}
+.brand small{display:block;color:var(--mut);font-weight:600;font-size:11px;margin-top:2px}
+.sec{color:var(--mut);font-size:10px;letter-spacing:.12em;text-transform:uppercase;margin:16px 8px 6px}
+.navi{display:flex;align-items:center;gap:9px;padding:9px 10px;border-radius:9px;cursor:pointer;color:#cdd6ea;font-weight:600}
+.navi:hover{background:#152038}
+.navi.on{background:var(--accent);color:#fff}
+.navi .em{width:18px;text-align:center}
+.main{flex:1;min-width:0;padding:20px 24px;max-width:1200px}
+.h1{font-size:20px;font-weight:800;margin:0 0 2px}
+.sub{color:var(--mut);margin:0 0 16px;font-size:13px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+.row{display:flex;flex-wrap:wrap;gap:12px}
+.kpi{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px;min-width:150px;flex:1}
+.kpi .n{font-size:24px;font-weight:800}
+.kpi .l{color:var(--mut);font-size:12px;margin-top:2px}
+label{display:block;font-size:12px;color:var(--mut);margin:8px 0 4px;font-weight:600}
+input,select,textarea{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px 10px;font:inherit}
+textarea{min-height:70px;resize:vertical}
+button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 14px;font-weight:700;cursor:pointer}
+button.sec{background:var(--chip);color:#cdd6ea;border:1px solid var(--line)}
+button.danger{background:var(--bad)}
+button:disabled{opacity:.5;cursor:not-allowed}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.05em;position:sticky;top:0;background:var(--panel)}
+td.wrap,th.wrap{white-space:normal}
+.badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700}
+.b-good{background:var(--goodbg);color:#6ee7a0}
+.b-warn{background:var(--warnbg);color:#f3c969}
+.b-bad{background:var(--badbg);color:#ff9b8f}
+.b-mut{background:var(--chip);color:var(--mut)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+.bar{height:8px;background:var(--chip);border-radius:6px;overflow:hidden}
+.bar>i{display:block;height:100%;background:var(--accent)}
+.flagchip{background:var(--badbg);color:#ff9b8f;border-radius:6px;padding:1px 6px;font-size:11px;margin-right:4px;font-weight:700}
+.toolbar{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-bottom:12px}
+.toolbar>div{min-width:150px}
+.right{margin-left:auto}
+.note{color:var(--mut);font-size:12px}
+.pill{background:var(--chip);border:1px solid var(--line);border-radius:20px;padding:3px 10px;font-size:12px;color:#cdd6ea}
+.hd{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
+.msg{padding:10px 12px;border-radius:8px;margin:10px 0;font-weight:600}
+.msg.ok{background:var(--goodbg);color:#6ee7a0}
+.msg.err{background:var(--badbg);color:#ff9b8f}
+.center{min-height:100vh;display:flex;align-items:center;justify-content:center}
+.login{width:340px}
+.foot{color:var(--mut);font-size:11px;margin-top:18px;border-top:1px solid var(--line);padding-top:10px}
+.scroll{overflow:auto;max-height:60vh}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useCallback } = React;
+
+const SUPABASE_URL = "https://rsehuwhoqbexmuidfkzq.supabase.co";
+const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJzZWh1d2hvcWJleG11aWRma3pxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAwNzg5MTMsImV4cCI6MjA5NTY1NDkxM30.B3kV4eMAlGNeZdWGT-PjgwdP7q1Msp4suiCwu47zmik";
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+
+const SEED_ROSTER = [{"id": "a_1", "name": "LAURA HAMED", "team": "Hunters", "seat": "XYZ1", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_2", "name": "JOUMANA MAGDY", "team": "Hunters", "seat": "XYZ2", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_3", "name": "SHAHD WAEL", "team": "Hunters", "seat": "XYZ3", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_4", "name": "MOHAMED HAMDY", "team": "Hunters", "seat": "XYZ4", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_5", "name": "ABDELRAHMAN ELSAYED", "team": "Hunters", "seat": "XYZ5", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_6", "name": "ROKAYA ORABI", "team": "Hunters", "seat": "XYZ6", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_7", "name": "SARAH MAGDI", "team": "Hunters", "seat": "XYZ7", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_8", "name": "NADER MOHAMED", "team": "Hunters", "seat": "XYZ8", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_9", "name": "MARAM EL GENDY", "team": "Hunters", "seat": "XYZ9", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_10", "name": "SALMA IBRAHIM", "team": "Hunters", "seat": "XYZ10", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_11", "name": "FARIDA AGHA", "team": "Hunters", "seat": "XYZ11", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_12", "name": "SAMA SAEED", "team": "Hunters", "seat": "XYZ12", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_13", "name": "ZEINA MOHSEN", "team": "Hunters", "seat": "XYZ13", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_14", "name": "ISLAM MAGDY", "team": "Hunters", "seat": "XYZ14", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_15", "name": "MARIAM ALAA", "team": "Hunters", "seat": "XYZ15", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_16", "name": "KENZY GAFAR", "team": "Hunters", "seat": "XYZ16", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_17", "name": "MUHAMMED SALEM", "team": "Hunters", "seat": "XYZ17", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_18", "name": "NOUR MOHAMED", "team": "Hunters", "seat": "XYZ18", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_19", "name": "YOUSSEF MORSI", "team": "Hunters", "seat": "XYZ19", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_20", "name": "FAYROUZ BADR", "team": "Hunters", "seat": "XYZ20", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_21", "name": "MALAK WALEED", "team": "Hunters", "seat": "XYZ21", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_22", "name": "YAHIA OMRAN", "team": "Hunters", "seat": "XYZ22", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_23", "name": "ANAS MATTAR", "team": "Hunters", "seat": "XYZ23", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_24", "name": "MARIAM ELFEEL", "team": "Hunters", "seat": "XYZ24", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_25", "name": "ISLAM AYMAN", "team": "Hunters", "seat": "XYZ25", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_26", "name": "IBRAHIM ALY", "team": "Hunters", "seat": "XYZ26", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_27", "name": "MOHAMED AHMED", "team": "Hunters", "seat": "XYZ27", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_28", "name": "AMR SOBHY", "team": "Hunters", "seat": "XYZ28", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_29", "name": "ZEYAD HAITHAM", "team": "Hunters", "seat": "XYZ29", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_30", "name": "FAHD ASHRAF", "team": "Hunters", "seat": "XYZ30", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_31", "name": "MOHAMED REZK", "team": "Slayers", "seat": "Slayer1", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_32", "name": "MERET MAGDY", "team": "Slayers", "seat": "Slayer2", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_33", "name": "FATMA MAHER", "team": "Slayers", "seat": "Slayer3", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_34", "name": "ALAA SALEH", "team": "Slayers", "seat": "Slayer4", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_35", "name": "MALAK AYMAN", "team": "Slayers", "seat": "Slayer5", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_36", "name": "MOHAMED SAIED", "team": "Slayers", "seat": "Slayer6", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_37", "name": "MENNA HISHAM", "team": "Slayers", "seat": "Slayer7", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_38", "name": "YASSER MOHAMED", "team": "Slayers", "seat": "Slayer8", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_39", "name": "FADY BOSHRA", "team": "Slayers", "seat": "Slayer9", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_40", "name": "OMAR MOHAMED", "team": "Slayers", "seat": "Slayer10", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_41", "name": "FATMA SAID", "team": "Slayers", "seat": "Slayer11", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_42", "name": "SARAH ASHRAF", "team": "Slayers", "seat": "Slayer12", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_43", "name": "LOBNA RAMEZ", "team": "Slayers", "seat": "Slayer13", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_44", "name": "NOURSEEN MAHMOUD", "team": "Slayers", "seat": "Slayer14", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_45", "name": "BASMALA ATEF", "team": "Slayers", "seat": "Slayer15", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_46", "name": "MARK NAZIH", "team": "Slayers", "seat": "Slayer16", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_47", "name": "MOHAMED AYMAN", "team": "Slayers", "seat": "Slayer17", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_48", "name": "ABDULLAH HANY", "team": "Slayers", "seat": "Slayer18", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_49", "name": "BASMALA TALAT", "team": "Slayers", "seat": "Slayer19", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_50", "name": "HAFEZ WAHBALLAH", "team": "Slayers", "seat": "Slayer20", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_51", "name": "SAMAA AHMED", "team": "Slayers", "seat": "Slayer21", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_52", "name": "KHADEJA KHALED", "team": "Slayers", "seat": "Slayer22", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_53", "name": "ARWA MORSY", "team": "Slayers", "seat": "Slayer23", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_54", "name": "GANNA AKRAM", "team": "Slayers", "seat": "Slayer24", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_55", "name": "OMAR AHMED", "team": "Slayers", "seat": "Slayer25", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_56", "name": "RODINA ALI", "team": "Slayers", "seat": "Slayer26", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_57", "name": "NOURAN ABDELHADY", "team": "Slayers", "seat": "Slayer27", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_58", "name": "FARAH MUSTAFA", "team": "Slayers", "seat": "Slayer28", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_59", "name": "ASSER AMEEN", "team": "Slayers", "seat": "Slayer29", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_60", "name": "MANAR ADEL", "team": "Slayers", "seat": "Slayer30", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_61", "name": "YOUSSEF WAHBALLAH", "team": "Fighters", "seat": "Fighter1", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_62", "name": "AHMED NAGY", "team": "Fighters", "seat": "Fighter2", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_63", "name": "HAIDY EHAB", "team": "Fighters", "seat": "Fighter3", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_64", "name": "MOHAMED GHAREEB", "team": "Fighters", "seat": "Fighter4", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_65", "name": "ABDELALAIM AHMED", "team": "Fighters", "seat": "Fighter5", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_66", "name": "MARIAM NABIL", "team": "Fighters", "seat": "Fighter6", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_67", "name": "AHMED MAHMOUD", "team": "Fighters", "seat": "Fighter7", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_68", "name": "JANA SAYED", "team": "Fighters", "seat": "Fighter8", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_69", "name": "MOHAMED ELSAYED", "team": "Fighters", "seat": "Fighter9", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_70", "name": "MOHAMED SHABAN", "team": "Fighters", "seat": "Fighter10", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_71", "name": "NOURHAN ADEL", "team": "Fighters", "seat": "Fighter11", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_72", "name": "ABDULRAHMAN HASANAIN", "team": "Fighters", "seat": "Fighter12", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_73", "name": "HANIN IBRAHIM", "team": "Fighters", "seat": "Fighter13", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_74", "name": "OMAR NASSER", "team": "Fighters", "seat": "Fighter14", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_75", "name": "EBRAM AWAD", "team": "Fighters", "seat": "Fighter15", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_76", "name": "YOUSSIF AHMED", "team": "Fighters", "seat": "Fighter16", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_77", "name": "TAREK BADRY", "team": "Fighters", "seat": "Fighter17", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_78", "name": "HEDIA ASHRAF", "team": "Fighters", "seat": "Fighter18", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_79", "name": "HAGER AYMAN", "team": "Fighters", "seat": "Fighter19", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_80", "name": "MARWAN MAHMOUD", "team": "Fighters", "seat": "Fighter20", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_81", "name": "NOURAY SALEM", "team": "Fighters", "seat": "Fighter21", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_82", "name": "HAWALIB SAAD", "team": "Fighters", "seat": "Fighter22", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_83", "name": "NASHWA SAAD", "team": "Fighters", "seat": "Fighter23", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_84", "name": "MOMEN KHALID", "team": "Fighters", "seat": "Fighter24", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_85", "name": "WALEED EL AMEER", "team": "Fighters", "seat": "Fighter25", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_86", "name": "FARHA IBRAHIM", "team": "Fighters", "seat": "Fighter26", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_87", "name": "KHALED SHAFIK", "team": "Fighters", "seat": "Fighter27", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_88", "name": "SHAHD ADEL", "team": "Fighters", "seat": "Fighter28", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_89", "name": "MOAMEN THARWAT", "team": "Fighters", "seat": "Fighter29", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_90", "name": "HALA BAKRY", "team": "Fighters", "seat": "Fighter30", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_91", "name": "RAWAN AL KASSAS", "team": "Killers", "seat": "Killer1", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_92", "name": "FARAH ABDELGAWAD", "team": "Killers", "seat": "Killer2", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_93", "name": "MARIEM BELAL", "team": "Killers", "seat": "Killer3", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_94", "name": "ROWAN MOUNIR", "team": "Killers", "seat": "Killer4", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_95", "name": "ABDELRAHMAN MOHAMED", "team": "Killers", "seat": "Killer5", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_96", "name": "ABDELRAHMAN SALEH", "team": "Killers", "seat": "Killer6", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_97", "name": "FARAH BAHAA", "team": "Killers", "seat": "Killer7", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_98", "name": "YOUSSEF MOHAMED", "team": "Killers", "seat": "Killer8", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_99", "name": "JANA MOHAMED", "team": "Killers", "seat": "Killer9", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_100", "name": "MOHAMED HASSAN", "team": "Killers", "seat": "Killer10", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_101", "name": "DAREEN HELAL", "team": "Killers", "seat": "Killer11", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_102", "name": "WALEED GAMAL", "team": "Killers", "seat": "Killer12", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_103", "name": "SEIF SALAMA", "team": "Killers", "seat": "Killer13", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_104", "name": "MAHMOUD EL SAKAAN", "team": "Killers", "seat": "Killer14", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_105", "name": "MOHAMED IDRISS", "team": "Killers", "seat": "Killer15", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_106", "name": "AREEG FARGHALI", "team": "Killers", "seat": "Killer16", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_107", "name": "NADA FEKRY", "team": "Killers", "seat": "Killer17", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_108", "name": "OMAR DESOKY", "team": "Killers", "seat": "Killer18", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_109", "name": "YOUSSEF TAREK", "team": "Killers", "seat": "Killer19", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_110", "name": "AMIRA ELSHAZLY", "team": "Killers", "seat": "Killer20", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_111", "name": "MERON ASFAWESEN", "team": "Killers", "seat": "Killer21", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_112", "name": "HAZEM AHMED", "team": "Killers", "seat": "Killer22", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_113", "name": "MOHANNED ABDELGHAFAR", "team": "Killers", "seat": "Killer23", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_114", "name": "MOSTAFA HATEM", "team": "Killers", "seat": "Killer24", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_115", "name": "SHAYMAA ISMAIL", "team": "Killers", "seat": "Killer25", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_116", "name": "BASSANT AMIN", "team": "Killers", "seat": "Killer26", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_117", "name": "MAHINOUR SAAD", "team": "Killers", "seat": "Killer27", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_118", "name": "MAHETAB MOHAMED", "team": "Killers", "seat": "Killer28", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_119", "name": "MARIAM TAREK", "team": "Killers", "seat": "Killer29", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_120", "name": "HAZEM EL SOKARY", "team": "Killers", "seat": "Killer30", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_121", "name": "REEM ALI", "team": "Titans", "seat": "Titan1", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_122", "name": "MANAR FATHY", "team": "Titans", "seat": "Titan2", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_123", "name": "ASHRAKAT MOHAMED", "team": "Titans", "seat": "Titan3", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_124", "name": "OMAR BEDAIR", "team": "Titans", "seat": "Titan4", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_125", "name": "NOOR MOHAMMED", "team": "Titans", "seat": "Titan5", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_126", "name": "NAYERA KAMEL", "team": "Titans", "seat": "Titan6", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_127", "name": "SALMA EL GENDY", "team": "Titans", "seat": "Titan7", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_128", "name": "MARIAM IBRAHIM", "team": "Titans", "seat": "Titan8", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_129", "name": "EIAD HESHAM", "team": "Titans", "seat": "Titan9", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_130", "name": "ARWA ELSAYED", "team": "Titans", "seat": "Titan10", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_131", "name": "ROWAN AHMED", "team": "Titans", "seat": "Titan11", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_132", "name": "RAHMA HAZEM", "team": "Titans", "seat": "Titan12", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_133", "name": "YOUSSEF GAMAL", "team": "Titans", "seat": "Titan13", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_134", "name": "ABDELRAHMAN HASHIM", "team": "Titans", "seat": "Titan14", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_135", "name": "SALSABIL WALEED", "team": "Titans", "seat": "Titan15", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_136", "name": "HESHAM AHMED", "team": "Titans", "seat": "Titan16", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_137", "name": "MOSTAFA MAHMOUD", "team": "Titans", "seat": "Titan17", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_138", "name": "NADA HASSAN", "team": "Titans", "seat": "Titan18", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_139", "name": "SHAIMAA RAFAT", "team": "Titans", "seat": "Titan19", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_140", "name": "MENNA EMAD", "team": "Titans", "seat": "Titan20", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_141", "name": "AHMED SAKR", "team": "Titans", "seat": "Titan21", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_142", "name": "HAZEM MOSTAFA", "team": "Titans", "seat": "Titan22", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_143", "name": "NAIRA ISMAIL", "team": "Titans", "seat": "Titan23", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_144", "name": "NAHED EISSA", "team": "Titans", "seat": "Titan24", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_145", "name": "NOUR WALID", "team": "Titans", "seat": "Titan25", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_146", "name": "AMIRA ALLAM", "team": "Titans", "seat": "Titan26", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_147", "name": "HANEN ROSHDY", "team": "Titans", "seat": "Titan27", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_148", "name": "SEIF WAEL", "team": "Titans", "seat": "Titan28", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_149", "name": "ISLAM AMER", "team": "Titans", "seat": "Titan29", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_150", "name": "MOHAMED ALY", "team": "Titans", "seat": "Titan30", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_151", "name": "MALAK MOATAZ", "team": "Nesting", "seat": "Nesting11", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_152", "name": "AMMAR EBRAHIM", "team": "Nesting", "seat": "Nesting12", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_153", "name": "MALAK HASSAN", "team": "Nesting", "seat": "Nesting13", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_154", "name": "MOHAMED MOUSSA", "team": "Nesting", "seat": "Nesting14", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_155", "name": "MARWAN MOHAMED", "team": "Nesting", "seat": "Nesting15", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_156", "name": "NOUR MOHAMED", "team": "Nesting", "seat": "Nesting16", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_157", "name": "SHAHD TAWFIK", "team": "Nesting", "seat": "Nesting17", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_158", "name": "FAYROUZ NABIL", "team": "Nesting", "seat": "Nesting18", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_159", "name": "AHMED IBRAHEM", "team": "Nesting", "seat": "Nesting19", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_160", "name": "ZEYAD KAMAL", "team": "Nesting", "seat": "Nesting20", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_161", "name": "FATMA ELSHEMY", "team": "Nesting", "seat": "Nesting21", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_162", "name": "HAYMAN WALEED", "team": "Nesting", "seat": "Nesting22", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_163", "name": "MARIAM ALADDIN", "team": "Nesting", "seat": "Nesting23", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_164", "name": "YASSIN TAWFIQ", "team": "Nesting", "seat": "Nesting24", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_165", "name": "SALMA ASHRAF", "team": "Nesting", "seat": "Nesting25", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_166", "name": "ZEINAB ABDO", "team": "Nesting", "seat": "Nesting26", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_167", "name": "SALMA ALI", "team": "Nesting", "seat": "Nesting27", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_168", "name": "IBRAHIM FARAG", "team": "Nesting", "seat": "Nesting28", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_169", "name": "MOHAMED HANY", "team": "Nesting", "seat": "Nesting29", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_170", "name": "MARYAM GHAZY", "team": "Nesting", "seat": "Nesting30", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_171", "name": "MENERVA AHMED", "team": "SSDI UN", "seat": "UN1", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_172", "name": "SHROUQ SHERIEF", "team": "SSDI UN", "seat": "UN2", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_173", "name": "OMAR LAGO", "team": "SSDI UN", "seat": "UN3", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_174", "name": "AHMED HESHAM", "team": "SSDI UN", "seat": "UN5", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_175", "name": "YASMINE SOLIMAN", "team": "SSDI UN", "seat": "UN6", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_176", "name": "KARAM MOHAMED", "team": "SSDI UN", "seat": "UN7", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_177", "name": "SHAHD HASSAN", "team": "SSDI UN", "seat": "UN9", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_178", "name": "ZEINA MOHAMED", "team": "SSDI UN", "seat": "UN13", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_179", "name": "ALFERDOUS ABOSHADY", "team": "SSDI UN", "seat": "UN15", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_180", "name": "MOHAMED RAMADAN", "team": "SSDI UN", "seat": "UN16", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_181", "name": "ABDELRAHMAN NAGAH", "team": "SSDI UN", "seat": "UN17", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_182", "name": "MAZEN KHALED", "team": "SSDI UN", "seat": "UN18", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_183", "name": "NAYERA WAHEED", "team": "SSDI UN", "seat": "UN19", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_184", "name": "MOSTAFA THABET", "team": "Vipers", "seat": "Viper1", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_185", "name": "AYA AHMED", "team": "Vipers", "seat": "Viper2", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_186", "name": "JOUDY AMR", "team": "Vipers", "seat": "Viper3", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_187", "name": "AHMED KHALAF", "team": "Vipers", "seat": "Viper4", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_188", "name": "YUSUF SAAD", "team": "Vipers", "seat": "Viper5", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_189", "name": "MOHAMED SAMY", "team": "Vipers", "seat": "Viper6", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_190", "name": "SEIF KHALID", "team": "Vipers", "seat": "Viper7", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_191", "name": "MARIAM HAMZA", "team": "Vipers", "seat": "Viper8", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_192", "name": "ABDELRAHMAN GHANEM", "team": "Vipers", "seat": "Viper9", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_193", "name": "AHMED EL KORDY", "team": "Vipers", "seat": "Viper10", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_194", "name": "ABDALLAH MOAWAD", "team": "Vipers", "seat": "Viper11", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_195", "name": "ABDELRAHMAN WEHAIDY", "team": "Vipers", "seat": "Viper12", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_196", "name": "HUSSEIN SHOKRY", "team": "Vipers", "seat": "Viper13", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_197", "name": "MOHAMED ZAGHLOUL", "team": "Vipers", "seat": "Viper14", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_198", "name": "MOHAMED FATHY", "team": "Vipers", "seat": "Viper15", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_199", "name": "MOHAMED MAHMOUD", "team": "Vipers", "seat": "Viper16", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_200", "name": "RAZAN MOGHAZY", "team": "Vipers", "seat": "Viper17", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_201", "name": "SEIF HENDY", "team": "Vipers", "seat": "Viper18", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_202", "name": "AHMED ELSHEIKH", "team": "Vipers", "seat": "Viper19", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_203", "name": "AHMED KHALIL", "team": "Vipers", "seat": "Viper20", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_204", "name": "ZAIN SAAD", "team": "Vipers", "seat": "Viper21", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_205", "name": "ABDULLAH ADEL", "team": "Vipers", "seat": "Viper22", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_206", "name": "HEBA MUHAMMED", "team": "Vipers", "seat": "Viper23", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_207", "name": "ALI MOHAMED", "team": "Vipers", "seat": "Viper24", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_208", "name": "FATMA YEHYA", "team": "Vipers", "seat": "Viper25", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_209", "name": "AKRAM ASHOUR", "team": "Vipers", "seat": "Viper26", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_210", "name": "MOMEN SAEED", "team": "Vipers", "seat": "Viper27", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_211", "name": "FATMA KHALED", "team": "Vipers", "seat": "Viper28", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_212", "name": "DANA ABDELAZIZ", "team": "Vipers", "seat": "Viper29", "status": "Full Time", "active": true, "campaignId": "ssdi"}, {"id": "a_213", "name": "EZZELDIN MONTASER", "team": "Vipers", "seat": "Viper30", "status": "Full Time", "active": true, "campaignId": "ssdi"}];
+
+const ACTIVITY_TYPES = ["Meeting","Coaching (Verbal)","Coaching (Chat)","Monitoring/QA","Performance Review","Incident Review","1:1 Check-in","Recognition"];
+const CHANNELS = ["In-person","Call","Chat","Video"];
+const REASONS = ["Performance","Quality/QA","Behavioral","Attendance","Routine/Scheduled","Incident Follow-up","Onboarding","Recognition","Other"];
+const THEMES = ["Tonality","Pauses","Dispositions","Engagement","Mentality","Closure","Rebuttals","Intro","Mic/Audio","Pronunciation","Late Replying","Question Handling","Confidence","Transfer Process","Product Knowledge","Attendance","Other"];
+const FOLLOWUP = ["N/A","Open","Done"];
+
+const KV = {
+  async get(key){ const {data,error}=await sb.from('kamal_control_kv').select('value').eq('key',key).maybeSingle(); if(error) throw error; return data?data.value:null; },
+  async prefix(pfx){ const like=pfx.replace(/[%_]/g,'\\$&')+'%'; let out=[],from=0,PAGE=1000;
+    while(true){ const {data,error}=await sb.from('kamal_control_kv').select('key,value').like('key',like).range(from,from+PAGE-1);
+      if(error) throw error; out=out.concat(data||[]); if(!data||data.length<PAGE) break; from+=PAGE; } return out; },
+  async set(key,value){ const {error}=await sb.from('kamal_control_kv').upsert({key,value},{onConflict:'key'}); if(error) throw error; },
+  async insert(key,value){ const {error}=await sb.from('kamal_control_kv').insert({key,value}); if(error) throw error; },
+  async del(key){ const {error}=await sb.from('kamal_control_kv').delete().eq('key',key); if(error) throw error; },
+};
+
+const todayISO = ()=>{ const d=new Date(); return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10); };
+const daysBetween=(a,b)=> Math.round((new Date(b)-new Date(a))/86400000);
+const fmt=(d)=> d? new Date(d).toLocaleDateString(undefined,{month:'short',day:'numeric'}) : '—';
+
+function computeFlags(rec, existing){
+  const f=[];
+  const isCoach = rec.type && rec.type.startsWith('Coaching');
+  const isMeet = rec.type==='Meeting'||isCoach;
+  const dup = (existing||[]).some(m=> m.team===rec.team && m.agentName===rec.agentName && m.date===rec.date && m.type===rec.type);
+  if(dup) f.push('DUPLICATE');
+  if(isMeet && (!rec.durationMin || Number(rec.durationMin)<3)) f.push('CHECK DURATION');
+  if(isCoach && !(rec.notes||'').trim()) f.push('NO NOTES');
+  if(rec.date> todayISO()) f.push('FUTURE DATE');
+  return f;
+}
+
+function Sidebar({user, page, setPage, campaign, campaigns, setCampaign, perms, signOut}){
+  const item=(id,em,label)=> <div className={"navi"+(page===id?" on":"")} onClick={()=>setPage(id)}><span className="em">{em}</span>{label}</div>;
+  return <div className="side">
+    <div className="brand">⚡ Kamal Control<small>Ops Add-on · coaching & roster</small></div>
+    <div className="sec">Campaign</div>
+    <select value={campaign} onChange={e=>setCampaign(e.target.value)}>
+      {campaigns.map(c=> <option key={c.id} value={c.id}>{c.name}</option>)}
+    </select>
+    <div className="sec">Do</div>
+    {perms.submit && item('submit','📝','Submit Meeting/Coaching')}
+    {perms.submit && item('mine','🗂','My Submissions')}
+    <div className="sec">Manage</div>
+    {perms.viewRoster && item('roster','👥','Agent Master')}
+    {perms.viewAnalysis && item('analysis','📊','Analysis (CEO)')}
+    <div className="sec">Account</div>
+    <div className="navi"><span className="em">{user.role==='ceo'?'👑':(user.role==='manager'?'🛡️':'👤')}</span><div>{user.name}<div className="note" style={{fontSize:11}}>{user.role.toUpperCase()}{user.team?(' · '+user.team):''}</div></div></div>
+    <div className="navi" onClick={signOut}><span className="em">⎋</span>Sign out</div>
+    <div className="foot">Saves to your live database. Survives refresh &amp; restart. Existing app data is untouched.</div>
+  </div>;
+}
+
+function AgentMaster({campaign, teams, user, perms}){
+  const canEdit = perms.editRoster;
+  const [roster,setRoster]=useState(null);
+  const [teamFilter,setTeamFilter]=useState('All');
+  const [msg,setMsg]=useState(null);
+  const [saving,setSaving]=useState(false);
+  const [edit,setEdit]=useState(null); // agent being edited or {new}
+  const load=useCallback(async()=>{ setMsg(null); try{ const r=await KV.get('ko_roster_'+campaign); setRoster(Array.isArray(r)?r:[]);}catch(e){setMsg({t:'err',m:'Load failed: '+e.message});} },[campaign]);
+  useEffect(()=>{ setRoster(null); load(); },[load]);
+  const persist=async(next)=>{ setSaving(true); setMsg(null); try{ await KV.set('ko_roster_'+campaign,next); setRoster(next); setMsg({t:'ok',m:'Saved to database.'});}catch(e){setMsg({t:'err',m:'Save failed: '+e.message});} setSaving(false); };
+  const importSeed=async()=>{ if(campaign!=='ssdi'){setMsg({t:'err',m:'Starter roster is only available for the SSDI campaign.'});return;} if(!confirm('Import '+SEED_ROSTER.length+' starter agents into this campaign roster? You can edit/remove afterwards.'))return; await persist(SEED_ROSTER.map(a=>({...a}))); };
+  if(roster===null) return <div className="card">Loading roster…</div>;
+  const list = roster.filter(a=> teamFilter==='All'||a.team===teamFilter);
+  const save=(a)=>{ let next; if(a.id && roster.some(x=>x.id===a.id)) next=roster.map(x=>x.id===a.id?a:x); else next=[...roster,{...a,id:a.id||('a_'+Date.now())}]; setEdit(null); persist(next); };
+  const remove=(id)=>{ if(!confirm('Remove this agent from the roster? (History of their meetings is kept.)'))return; persist(roster.filter(x=>x.id!==id)); };
+  const toggle=(id)=> persist(roster.map(x=> x.id===id?{...x,active: x.active?false:true}:x));
+  return <div>
+    <div className="hd"><div><div className="h1">Agent Master</div><div className="sub">{roster.length} agents · single source of truth for this campaign</div></div>
+      {canEdit && <div style={{display:'flex',gap:8}}>
+        <button className="sec" onClick={importSeed} disabled={saving}>Import starter roster</button>
+        <button onClick={()=>setEdit({team:teams[0]||'',active:true,status:'Full Time',campaignId:campaign})} disabled={saving}>+ Add agent</button>
+      </div>}
+    </div>
+    {!canEdit && <div className="note" style={{marginBottom:10}}>You have view-only access. Only the CEO can edit the roster.</div>}
+    {msg && <div className={"msg "+(msg.t==='ok'?'ok':'err')}>{msg.m}</div>}
+    <div className="card">
+      <div className="toolbar">
+        <div><label>Team</label><select value={teamFilter} onChange={e=>setTeamFilter(e.target.value)}><option>All</option>{teams.map(t=><option key={t}>{t}</option>)}</select></div>
+        <div className="right note">Active: {roster.filter(a=>a.active).length} · Inactive: {roster.filter(a=>!a.active).length}</div>
+      </div>
+      <div className="scroll">
+      <table><thead><tr><th>Agent</th><th>Team</th><th>Seat</th><th>Status</th><th>Active</th>{canEdit&&<th></th>}</tr></thead>
+      <tbody>
+      {list.map(a=> <tr key={a.id}>
+        <td className="wrap">{a.name}</td><td>{a.team}</td><td>{a.seat||'—'}</td><td>{a.status||'—'}</td>
+        <td>{a.active? <span className="badge b-good">Active</span>:<span className="badge b-mut">Inactive</span>}</td>
+        {canEdit&&<td><div style={{display:'flex',gap:6}}><button className="sec" onClick={()=>setEdit(a)}>Edit</button><button className="sec" onClick={()=>toggle(a.id)}>{a.active?'Deactivate':'Activate'}</button><button className="danger" onClick={()=>remove(a.id)}>✕</button></div></td>}
+      </tr>)}
+      {list.length===0 && <tr><td colSpan={canEdit?6:5} className="note">No agents{roster.length===0?' yet — add one or import the starter roster.':' for this team.'}</td></tr>}
+      </tbody></table>
+      </div>
+    </div>
+    {edit && <div className="card" style={{border:'1px solid var(--accent)'}}>
+      <div className="h1" style={{fontSize:16}}>{edit.id?'Edit agent':'Add agent'}</div>
+      <div className="grid3">
+        <div><label>Full name *</label><input value={edit.name||''} onChange={e=>setEdit({...edit,name:e.target.value})}/></div>
+        <div><label>Team *</label><select value={edit.team||''} onChange={e=>setEdit({...edit,team:e.target.value})}>{teams.map(t=><option key={t}>{t}</option>)}</select></div>
+        <div><label>Seat / Username</label><input value={edit.seat||''} onChange={e=>setEdit({...edit,seat:e.target.value})}/></div>
+        <div><label>Status</label><select value={edit.status||'Full Time'} onChange={e=>setEdit({...edit,status:e.target.value})}><option>Full Time</option><option>Part Time</option></select></div>
+        <div><label>Active</label><select value={edit.active?'Yes':'No'} onChange={e=>setEdit({...edit,active:e.target.value==='Yes'})}><option>Yes</option><option>No</option></select></div>
+      </div>
+      <div style={{display:'flex',gap:8,marginTop:12}}>
+        <button disabled={!edit.name||!edit.team} onClick={()=>save(edit)}>Save</button>
+        <button className="sec" onClick={()=>setEdit(null)}>Cancel</button>
+      </div>
+    </div>}
+  </div>;
+}
+
+function SubmitMeeting({campaign, teams, user, perms}){
+  const scopeTeams = user.role==='tl' ? (user.team?[user.team]:teams) : (user.role==='manager'&&user.team?[user.team]:teams);
+  const [roster,setRoster]=useState([]);
+  const [team,setTeam]=useState(scopeTeams[0]||'');
+  const [form,setForm]=useState(()=>blank());
+  const [msg,setMsg]=useState(null);
+  const [busy,setBusy]=useState(false);
+  function blank(){ return {date:todayISO(),agentName:'',type:'Coaching (Verbal)',channel:'Call',durationMin:'',reason:'Performance',kpiRef:'',notes:'',theme:'Tonality',incident:'No',action:'',followup:'N/A'}; }
+  useEffect(()=>{ (async()=>{ const r=await KV.get('ko_roster_'+campaign); setRoster(Array.isArray(r)?r:[]); })(); },[campaign]);
+  useEffect(()=>{ if(!scopeTeams.includes(team)) setTeam(scopeTeams[0]||''); },[campaign]);
+  const agents = roster.filter(a=>a.active && a.team===team);
+  const submit=async()=>{
+    if(!form.agentName){ setMsg({t:'err',m:'Pick an agent.'}); return; }
+    setBusy(true); setMsg(null);
+    try{
+      const existing = (await KV.prefix('ko_meeting_'+campaign+'_')).map(r=>r.value);
+      const rec={...form, id:'m_'+Date.now()+'_'+Math.random().toString(36).slice(2,7), campaignId:campaign, team,
+        loggedById:user.id, loggedByName:user.name, loggedByRole:user.role, createdAt:new Date().toISOString()};
+      rec.flags=computeFlags(rec, existing);
+      await KV.insert('ko_meeting_'+campaign+'_'+rec.id, rec);
+      setMsg({t:'ok',m:'Logged ✓ Saved to database'+(rec.flags.length?(' · flags: '+rec.flags.join(', ')):'')});
+      setForm(blank());
+    }catch(e){ setMsg({t:'err',m:'Save failed: '+e.message}); }
+    setBusy(false);
+  };
+  return <div>
+    <div className="hd"><div><div className="h1">Submit Meeting / Coaching</div><div className="sub">Logged as {user.name} · saves instantly to the database</div></div></div>
+    {msg && <div className={"msg "+(msg.t==='ok'?'ok':'err')}>{msg.m}</div>}
+    <div className="card">
+      <div className="grid3">
+        <div><label>Team *</label><select value={team} onChange={e=>{setTeam(e.target.value);setForm(f=>({...f,agentName:''}));}} disabled={scopeTeams.length<=1}>{scopeTeams.map(t=><option key={t}>{t}</option>)}</select></div>
+        <div><label>Agent *</label><select value={form.agentName} onChange={e=>setForm({...form,agentName:e.target.value})}><option value="">— select —</option>{agents.map(a=><option key={a.id}>{a.name}</option>)}</select></div>
+        <div><label>Date *</label><input type="date" max={todayISO()} value={form.date} onChange={e=>setForm({...form,date:e.target.value})}/></div>
+        <div><label>Activity type *</label><select value={form.type} onChange={e=>setForm({...form,type:e.target.value})}>{ACTIVITY_TYPES.map(t=><option key={t}>{t}</option>)}</select></div>
+        <div><label>Channel</label><select value={form.channel} onChange={e=>setForm({...form,channel:e.target.value})}>{CHANNELS.map(t=><option key={t}>{t}</option>)}</select></div>
+        <div><label>Duration (min)</label><input type="number" min="0" value={form.durationMin} onChange={e=>setForm({...form,durationMin:e.target.value})}/></div>
+        <div><label>Reason / trigger</label><select value={form.reason} onChange={e=>setForm({...form,reason:e.target.value})}>{REASONS.map(t=><option key={t}>{t}</option>)}</select></div>
+        <div><label>Performance / KPI ref</label><input value={form.kpiRef} onChange={e=>setForm({...form,kpiRef:e.target.value})} placeholder="e.g. transfers, QA 82%"/></div>
+        <div><label>Main theme</label><select value={form.theme} onChange={e=>setForm({...form,theme:e.target.value})}>{THEMES.map(t=><option key={t}>{t}</option>)}</select></div>
+      </div>
+      <label>Feedback / coaching notes</label>
+      <textarea value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})} placeholder="What was discussed / coached…"/>
+      <div className="grid3">
+        <div><label>Incident?</label><select value={form.incident} onChange={e=>setForm({...form,incident:e.target.value})}><option>No</option><option>Yes</option></select></div>
+        <div><label>Follow-up</label><select value={form.followup} onChange={e=>setForm({...form,followup:e.target.value})}>{FOLLOWUP.map(t=><option key={t}>{t}</option>)}</select></div>
+        <div><label>Action taken</label><input value={form.action} onChange={e=>setForm({...form,action:e.target.value})}/></div>
+      </div>
+      <div style={{marginTop:14,display:'flex',gap:10,alignItems:'center'}}>
+        <button onClick={submit} disabled={busy}>{busy?'Saving…':'Submit'}</button>
+        <span className="note">Each submission is saved as its own record — concurrent TL submissions never overwrite each other.</span>
+      </div>
+    </div>
+  </div>;
+}
+
+function MySubmissions({campaign, user}){
+  const [rows,setRows]=useState(null);
+  useEffect(()=>{ (async()=>{ const r=await KV.prefix('ko_meeting_'+campaign+'_'); const mine=r.map(x=>x.value).filter(v=>v.loggedById===user.id).sort((a,b)=> (b.createdAt||'').localeCompare(a.createdAt||'')); setRows(mine); })(); },[campaign,user.id]);
+  if(rows===null) return <div className="card">Loading…</div>;
+  return <div>
+    <div className="h1">My Submissions</div><div className="sub">{rows.length} entries you logged in this campaign</div>
+    <div className="card scroll">
+      <table><thead><tr><th>Date</th><th>Agent</th><th>Team</th><th>Type</th><th>Reason</th><th>Dur</th><th>Theme</th><th>Inc</th><th>Flags</th></tr></thead>
+      <tbody>{rows.map(m=><tr key={m.id}><td>{fmt(m.date)}</td><td className="wrap">{m.agentName}</td><td>{m.team}</td><td>{m.type}</td><td>{m.reason}</td><td>{m.durationMin||'—'}</td><td>{m.theme}</td><td>{m.incident==='Yes'?<span className="badge b-bad">Yes</span>:'—'}</td><td>{(m.flags||[]).map(f=><span key={f} className="flagchip">{f}</span>)}</td></tr>)}
+      {rows.length===0&&<tr><td colSpan="9" className="note">No submissions yet.</td></tr>}</tbody></table>
+    </div>
+  </div>;
+}
+
+function Analysis({campaign, teams, user}){
+  const [meetings,setMeetings]=useState(null);
+  const [roster,setRoster]=useState([]);
+  const [from,setFrom]=useState(()=>{const d=new Date();d.setDate(d.getDate()-27);return d.toISOString().slice(0,10);});
+  const [to,setTo]=useState(todayISO());
+  const load=useCallback(async()=>{ const [m,r]=await Promise.all([KV.prefix('ko_meeting_'+campaign+'_'), KV.get('ko_roster_'+campaign)]); setMeetings(m.map(x=>x.value)); setRoster(Array.isArray(r)?r:[]); },[campaign]);
+  useEffect(()=>{ setMeetings(null); load(); },[load]);
+  const inRange = useMemo(()=> (meetings||[]).filter(m=> m.date>=from && m.date<=to), [meetings,from,to]);
+  if(meetings===null) return <div className="card">Loading analysis…</div>;
+  const isCoach=t=> t&&t.startsWith('Coaching');
+  const teamRows = teams.map(t=>{
+    const ms=inRange.filter(m=>m.team===t);
+    const active=roster.filter(a=>a.active&&a.team===t);
+    const touched=new Set(ms.map(m=>m.agentName));
+    const durs=ms.map(m=>Number(m.durationMin)).filter(x=>x>0);
+    return {team:t, size:active.length, total:ms.length,
+      meetings:ms.filter(m=>m.type==='Meeting').length,
+      coach:ms.filter(m=>isCoach(m.type)).length,
+      mon:ms.filter(m=>m.type==='Monitoring/QA').length,
+      perf:ms.filter(m=>m.reason==='Performance').length,
+      touched:touched.size, cov: active.length? touched.size/active.length:0,
+      avg: durs.length? (durs.reduce((a,b)=>a+b,0)/durs.length):0,
+      inc:ms.filter(m=>m.incident==='Yes').length,
+      act:ms.filter(m=>(m.action||'').trim()).length,
+      open:ms.filter(m=>m.followup==='Open').length,
+      flag:ms.filter(m=>(m.flags||[]).length).length};
+  });
+  const tot=(k)=> teamRows.reduce((a,b)=>a+b[k],0);
+  const agents = roster.filter(a=>a.active);
+  const cov = agents.map(a=>{
+    const ms=inRange.filter(m=>m.agentName===a.name && m.team===a.team);
+    const all=(meetings||[]).filter(m=>m.agentName===a.name&&m.team===a.team);
+    const last= all.length? all.map(m=>m.date).sort().slice(-1)[0]:null;
+    const since= last? daysBetween(last, todayISO()):null;
+    const status= !last?'NEVER':(since>7?'NEGLECTED':'OK');
+    return {name:a.name,team:a.team,last,since,touch:ms.length,coach:ms.filter(m=>isCoach(m.type)).length,inc:ms.filter(m=>m.incident==='Yes').length,perf:ms.filter(m=>m.reason==='Performance').length,status};
+  }).sort((a,b)=> (a.status==='NEVER'?-2:a.status==='NEGLECTED'?-1:0)-(b.status==='NEVER'?-2:b.status==='NEGLECTED'?-1:0) || (b.since||0)-(a.since||0));
+  const themeCounts=THEMES.map(t=>({t,n:inRange.filter(m=>m.theme===t).length})).filter(x=>x.n>0).sort((a,b)=>b.n-a.n);
+  const maxTheme=Math.max(1,...themeCounts.map(x=>x.n));
+  const incTot=inRange.filter(m=>m.incident==='Yes');
+  const incActioned=incTot.filter(m=>(m.action||'').trim()).length;
+  const setQuick=(days)=>{const d=new Date();d.setDate(d.getDate()-days+1);setFrom(d.toISOString().slice(0,10));setTo(todayISO());};
+  return <div>
+    <div className="hd"><div><div className="h1">Analysis <span className="pill">CEO / Manager</span></div><div className="sub">Live from the database · {inRange.length} activities in range</div></div></div>
+    <div className="card"><div className="toolbar">
+      <div><label>From</label><input type="date" value={from} onChange={e=>setFrom(e.target.value)}/></div>
+      <div><label>To</label><input type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
+      <div style={{minWidth:'auto',display:'flex',gap:6,alignItems:'end'}}>
+        <button className="sec" onClick={()=>setQuick(7)}>7d</button>
+        <button className="sec" onClick={()=>setQuick(28)}>28d</button>
+        <button className="sec" onClick={()=>setQuick(90)}>90d</button>
+        <button className="sec" onClick={load}>↻ Refresh</button>
+      </div>
+    </div>
+    <div className="row">
+      <div className="kpi"><div className="n">{inRange.length}</div><div className="l">Total activities</div></div>
+      <div className="kpi"><div className="n">{tot('coach')}</div><div className="l">Coachings</div></div>
+      <div className="kpi"><div className="n">{tot('meetings')}</div><div className="l">Meetings</div></div>
+      <div className="kpi"><div className="n">{tot('perf')}</div><div className="l">Performance-driven</div></div>
+      <div className="kpi"><div className="n">{incTot.length}</div><div className="l">Incidents</div></div>
+      <div className="kpi"><div className="n">{cov.filter(a=>a.status!=='OK').length}</div><div className="l">Neglected / never</div></div>
+    </div></div>
+
+    <div className="card"><div className="h1" style={{fontSize:16,marginBottom:8}}>TL / Team Scorecard</div><div className="scroll">
+      <table><thead><tr><th>Team</th><th>Active</th><th>Total</th><th>Meet</th><th>Coach</th><th>Monitor</th><th>Perf</th><th>Agents touched</th><th>Coverage</th><th>Avg dur</th><th>Incidents</th><th>Actioned</th><th>Open</th><th>Flagged</th></tr></thead>
+      <tbody>{teamRows.map(r=><tr key={r.team}><td>{r.team}</td><td>{r.size}</td><td>{r.total}</td><td>{r.meetings}</td><td>{r.coach}</td><td>{r.mon}</td><td>{r.perf}</td><td>{r.touched}</td>
+        <td><span className={"badge "+(r.cov>=0.75?'b-good':r.cov>=0.4?'b-warn':'b-bad')}>{Math.round(r.cov*100)}%</span></td>
+        <td>{r.avg?r.avg.toFixed(1):'—'}</td><td>{r.inc?<span className="badge b-bad">{r.inc}</span>:'0'}</td><td>{r.act}</td><td>{r.open}</td><td>{r.flag?<span className="badge b-warn">{r.flag}</span>:'0'}</td></tr>)}
+      </tbody></table></div>
+    </div>
+
+    <div className="grid2">
+      <div className="card"><div className="h1" style={{fontSize:16,marginBottom:8}}>Agent Coverage</div><div className="scroll">
+        <table><thead><tr><th>Agent</th><th>Team</th><th>Last</th><th>Days</th><th>Touch</th><th>Coach</th><th>Inc</th><th>Status</th></tr></thead>
+        <tbody>{cov.map(a=><tr key={a.team+a.name}><td className="wrap">{a.name}</td><td>{a.team}</td><td>{fmt(a.last)}</td><td>{a.since==null?'—':a.since}</td><td>{a.touch}</td><td>{a.coach}</td><td>{a.inc||'—'}</td>
+          <td><span className={"badge "+(a.status==='OK'?'b-good':a.status==='NEGLECTED'?'b-warn':'b-bad')}>{a.status}</span></td></tr>)}
+        {cov.length===0&&<tr><td colSpan="8" className="note">No active agents in roster.</td></tr>}</tbody></table></div>
+      </div>
+      <div>
+        <div className="card"><div className="h1" style={{fontSize:16,marginBottom:8}}>Incidents &amp; Actions</div>
+          <div className="row"><div className="kpi"><div className="n">{incTot.length}</div><div className="l">Incidents</div></div>
+          <div className="kpi"><div className="n">{incTot.length?Math.round(incActioned/incTot.length*100):0}%</div><div className="l">With action</div></div>
+          <div className="kpi"><div className="n">{inRange.filter(m=>m.followup==='Open').length}</div><div className="l">Open follow-ups</div></div></div>
+        </div>
+        <div className="card"><div className="h1" style={{fontSize:16,marginBottom:8}}>Coaching Themes</div>
+          {themeCounts.length===0 && <div className="note">No themes in range.</div>}
+          {themeCounts.map(x=><div key={x.t} style={{marginBottom:8}}><div style={{display:'flex',justifyContent:'space-between',fontSize:12}}><span>{x.t}</span><span className="note">{x.n}</span></div><div className="bar"><i style={{width:(x.n/maxTheme*100)+'%'}}></i></div></div>)}
+        </div>
+      </div>
+    </div>
+    <div className="foot">Data source: your Supabase database (keys <code>ko_meeting_{campaign}_*</code> and <code>ko_roster_{campaign}</code>). Nothing here reads or writes your existing app keys.</div>
+  </div>;
+}
+
+function Login({users, onLogin}){
+  const [id,setId]=useState(users[0]?users[0].id:'');
+  const [pw,setPw]=useState(''); const [err,setErr]=useState('');
+  const go=()=>{ const u=users.find(x=>x.id===id); if(!u){setErr('Pick a user');return;} if(u.password!=null && String(u.password)!==pw){ setErr('Wrong password'); return; } onLogin(u); };
+  return <div className="center"><div className="card login">
+    <div className="brand" style={{padding:0,marginBottom:12}}>⚡ Kamal Control<small>Ops Add-on</small></div>
+    <label>User</label><select value={id} onChange={e=>setId(e.target.value)}>{users.filter(u=>u.active!==false).map(u=><option key={u.id} value={u.id}>{u.name} · {u.role}</option>)}</select>
+    <label>Password</label><input type="password" value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==='Enter'&&go()}/>
+    {err&&<div className="msg err">{err}</div>}
+    <button style={{width:'100%',marginTop:12}} onClick={go}>Sign in</button>
+    <div className="note" style={{marginTop:10}}>Tip: if you're already signed into the main app in this browser, this opens without asking.</div>
+  </div></div>;
+}
+
+function App(){
+  const [users,setUsers]=useState(null);
+  const [user,setUser]=useState(null);
+  const [campaigns,setCampaigns]=useState([]);
+  const [campaign,setCampaign]=useState('ssdi');
+  const [cfg,setCfg]=useState({});
+  const [page,setPage]=useState('submit');
+  const [err,setErr]=useState('');
+
+  useEffect(()=>{ (async()=>{ try{
+    const [u,c]=await Promise.all([KV.get('ko_users'),KV.get('ko_campaigns')]);
+    const us=Array.isArray(u)?u:[]; setUsers(us);
+    const cs=Array.isArray(c)?c:[]; setCampaigns(cs);
+    let ac='ssdi'; try{ ac=JSON.parse(localStorage.getItem('ko_active_campaign'))||localStorage.getItem('ko_active_campaign')||'ssdi'; }catch(e){}
+    if(cs.length && !cs.some(x=>x.id===ac)) ac=cs[0].id;
+    setCampaign(ac);
+    let sess=null; try{ sess=JSON.parse(localStorage.getItem('ko_session')); }catch(e){}
+    if(sess&&sess.id){ const me=us.find(x=>x.id===sess.id); if(me) setUser(me); }
+  }catch(e){ setErr('Could not connect to database: '+e.message); } })(); },[]);
+
+  useEffect(()=>{ if(!campaign) return; (async()=>{ try{ const c=await KV.get('ko_config_'+campaign); setCfg(c||{}); }catch(e){} })(); },[campaign]);
+
+  const teams = useMemo(()=> (cfg&&cfg.teams? cfg.teams.map(t=>t.name):[]), [cfg]);
+  const doLogin=(u)=>{ try{ localStorage.setItem('ko_session',JSON.stringify({id:u.id})); }catch(e){} setUser(u); };
+  const signOut=()=>{ try{ localStorage.removeItem('ko_session'); }catch(e){} setUser(null); };
+
+  if(err) return <div className="center"><div className="card login"><div className="msg err">{err}</div></div></div>;
+  if(users===null) return <div className="center"><div className="note">Loading…</div></div>;
+  if(!user) return <Login users={users} onLogin={doLogin}/>;
+
+  const role=user.role;
+  const perms={ submit: ['tl','manager','ceo'].includes(role), viewRoster:['ceo','manager'].includes(role), editRoster: role==='ceo', viewAnalysis:['ceo','manager'].includes(role) };
+  // default page per role
+  const allowed = { submit:perms.submit, mine:perms.submit, roster:perms.viewRoster, analysis:perms.viewAnalysis };
+  const curr = allowed[page]? page : (perms.submit?'submit':(perms.viewAnalysis?'analysis':'roster'));
+
+  return <div className="app">
+    <Sidebar user={user} page={curr} setPage={setPage} campaign={campaign} campaigns={campaigns} setCampaign={setCampaign} perms={perms} signOut={signOut}/>
+    <div className="main">
+      {curr==='submit' && perms.submit && <SubmitMeeting campaign={campaign} teams={teams} user={user} perms={perms}/>}
+      {curr==='mine' && perms.submit && <MySubmissions campaign={campaign} user={user}/>}
+      {curr==='roster' && perms.viewRoster && <AgentMaster campaign={campaign} teams={teams} user={user} perms={perms}/>}
+      {curr==='analysis' && perms.viewAnalysis && <Analysis campaign={campaign} teams={teams} user={user}/>}
+    </div>
+  </div>;
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
