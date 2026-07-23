@@ -95,7 +95,7 @@ const KV = {
 
 const todayISO = ()=>{ const d=new Date(); return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10); };
 const daysBetween=(a,b)=> Math.round((new Date(b)-new Date(a))/86400000);
-const fmt=(d)=> d? new Date(d).toLocaleDateString(undefined,{month:'short',day:'numeric'}) : '—';
+const fmt=(d)=>{ if(!d) return '—'; const s=String(d); const dt=s.length===10?new Date(s+'T00:00:00'):new Date(s); return dt.toLocaleDateString(undefined,{month:'short',day:'numeric'}); };
 
 function computeFlags(rec, existing){
   const f=[];
