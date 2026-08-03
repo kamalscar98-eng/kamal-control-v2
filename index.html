@@ -8,6 +8,77 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
 <style>html,body{margin:0;padding:0;background:#080c18}*{font-family:'DM Sans',system-ui,sans-serif}input[type=date],input[type=week],select{color-scheme:dark}</style>
+<script>
+/* ==== Kamal Control sync guard - added 2026-08-03 =====================
+   Blocks the two write patterns that caused data loss:
+     1. any write to kamal_control_kv before the first successful pull
+        (the boot-time re-seed that overwrote live data with defaults)
+     2. any {"__del":true} tombstone write (which emptied campaign tabs)
+   Pre-sync writes are deferred and replayed via queuePush() once the
+   first pull succeeds, so nothing is dropped.
+   Inspect at any time with:  __kcGuardStatus()
+   ==================================================================== */
+(function () {
+  if (window.__KC_GUARD__) return;
+  window.__KC_GUARD__ = '2026-08-03';
+  var origFetch = window.fetch.bind(window);
+  var pulled = false, blocked = 0, deferred = [];
+
+  function keysFrom(body) {
+    try {
+      var p = JSON.parse(body);
+      if (!Array.isArray(p)) p = [p];
+      return p.map(function (r) { return r && r.key; }).filter(Boolean);
+    } catch (e) { return []; }
+  }
+  function deny(reason, body) {
+    blocked++;
+    if (reason === 'presync') {
+      keysFrom(body).forEach(function (k) { if (deferred.indexOf(k) < 0) deferred.push(k); });
+    }
+    console.warn('[kc-guard] blocked write (' + reason + '), total ' + blocked);
+    return Promise.resolve(new Response('{"kcGuard":"' + reason + '"}', {
+      status: 503, headers: { 'Content-Type': 'application/json' } }));
+  }
+  function onSynced() {
+    if (!deferred.length) return;
+    var list = deferred.slice(); deferred.length = 0;
+    console.info('[kc-guard] sync complete - replaying ' + list.length + ' deferred write(s)');
+    list.forEach(function (k) {
+      try { if (typeof window.queuePush === 'function') window.queuePush(k); } catch (e) {}
+    });
+  }
+
+  window.fetch = function (input, init) {
+    var url = '', method = 'GET';
+    try { url = (typeof input === 'string') ? input : (input && input.url) || ''; } catch (e) {}
+    try { method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase(); } catch (e) {}
+    var isKV = url.indexOf('/rest/v1/kamal_control_kv') !== -1;
+
+    if (isKV && method === 'GET') {
+      return origFetch(input, init).then(function (res) {
+        if (res && res.ok && !pulled) {
+          pulled = true;
+          console.info('[kc-guard] initial sync complete - writes enabled');
+          onSynced();
+        }
+        return res;
+      });
+    }
+    if (isKV && (method === 'POST' || method === 'PATCH' || method === 'PUT')) {
+      var body = '';
+      try { body = (init && typeof init.body === 'string') ? init.body : ''; } catch (e) {}
+      if (!pulled) return deny('presync', body);
+      if (body.indexOf('"__del"') !== -1) return deny('tombstone', body);
+    }
+    return origFetch(input, init);
+  };
+
+  window.__kcGuardStatus = function () {
+    return { installed: window.__KC_GUARD__, pulled: pulled, blocked: blocked, deferred: deferred.slice() };
+  };
+})();
+</script>
 <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
