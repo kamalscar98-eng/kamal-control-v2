@@ -91,9 +91,9 @@ const { useState, useEffect, useMemo } = React;
 
 // ───────────── CONSTANTS ─────────────
 const HOURS = ["9:00 AM", "10:00 AM","11:00 AM","12:00 PM","1:00 PM","2:00 PM","3:00 PM","4:00 PM","5:00 PM","6:00 PM","7:00 PM"];
-const SHRINK_KEYS = ["isp","emergency","dayoff","tech","late","nsnc","sick","shadowing"];
+const SHRINK_KEYS = ["isp","emergency","dayoff","pt","tech","late","nsnc","sick","shadowing"];
 const U_TYPES = ["Sick","Late login","ISP / Internet","Power outage","Tech / Hardware","Emergency","No show / NSNC","Early leave / logout","Part time","Exam / Study"];
-const SHRINK_LABELS = {isp:"ISP/Outage",emergency:"Emergency",dayoff:"Day Off",tech:"Tech Issues",late:"Late/PT",nsnc:"NSNC",sick:"Sick",shadowing:"Shadowing"};
+const SHRINK_LABELS = {isp:"ISP/Outage",emergency:"Emergency",dayoff:"Day Off",pt:"Part Time",tech:"Tech Issues",late:"Late Login",nsnc:"NSNC",sick:"Sick",shadowing:"Shadowing"};
 const FILL_TARGET_DEFAULT = 87.2;
 const VERSION = "2.2";
 const DEFAULT_CAMPAIGNS = [{ id:"ssdi", name:"SSDI Campaign", createdAt: new Date().toISOString() }];
@@ -548,56 +548,67 @@ const SectionTitle = ({children})=><div style={s.ctitle}>{children}</div>;
     return m;
   }
 
-  // ───────── Feature 2: are TLs actually logging what their headcount claims? ─────────
+  // Which hourly bucket is satisfied by which request, and from which tab.
+  // shadowing is training — no request expected, so it is not matched.
+  const KC_MATCH = [
+    {k:"dayoff",    label:"Day Off",    dayoffType:["planned"]},
+    {k:"pt",        label:"Part Time",  dayoffType:["part time"], unplCat:["Part time"]},
+    {k:"emergency", label:"Emergency",  dayoffType:["emergency"], unplCat:["Emergency"]},
+    {k:"sick",      label:"Sick",       dayoffType:["sick"],      unplCat:["Sick"]},
+    {k:"isp",       label:"ISP/Outage", unplCat:["ISP / Internet","Power outage"]},
+    {k:"tech",      label:"Tech",       unplCat:["Tech / Hardware"]},
+    {k:"late",      label:"Late Login", unplCat:["Late login"]},
+    {k:"nsnc",      label:"NSNC",       unplCat:["No show / NSNC"]},
+  ];
+
   function buildCompliance(cid, from, to){
     const dayoff=LS.get(cKey(cid,"dayoff"),[])||[];
     const unpl  =LS.get(cKey(cid,"unplanned"),[])||[];
     const tlMap =teamToTL();
+    const cfg   =LS.get(cKey(cid,"config"),null);
+    const budgetOf={}; if(cfg&&Array.isArray(cfg.teams)) cfg.teams.forEach(t=>budgetOf[normTeam(t.name)]=iv(t.required));
     const rows=[];
     hourlyDates(cid).forEach(date=>{
       if(from&&date<from) return;
       if(to&&date>to) return;
       const day=LS.get(cKey(cid,"hourly")+"_"+date,{})||{};
       const perTeam={};
-      Object.keys(day).forEach(k=>{
-        const parts=k.split("|"); if(parts.length<3) return;
-        const team=normTeam(parts[2]); const e=day[k]||{};
-        const t=perTeam[team]||(perTeam[team]={dayoff:0,sick:0,emergency:0,unpl:0,hours:0,peak:0});
-        // headcount claims are per-hour snapshots: the day's true figure is the peak
-        t.dayoff=Math.max(t.dayoff,iv(e.dayoff)); t.sick=Math.max(t.sick,iv(e.sick));
-        t.emergency=Math.max(t.emergency,iv(e.emergency));
-        t.unpl=Math.max(t.unpl, iv(e.isp)+iv(e.late)+iv(e.nsnc)+iv(e.tech));
-        t.peak=Math.max(t.peak,iv(e.peak));
-        if(e.peak!==""&&e.peak!=null) t.hours++;
+      Object.keys(day).forEach(hk=>{
+        const parts=hk.split("|"); if(parts.length<3) return;
+        const team=normTeam(parts[2]); const e=day[hk]||{};
+        if(String(e.peak||"")==="" && String(e.active||"")==="") return;
+        const t=perTeam[team]||(perTeam[team]={claim:{},hours:0,peak:0,unbalanced:0});
+        KC_MATCH.forEach(m=>{ t.claim[m.k]=Math.max(t.claim[m.k]||0, iv(e[m.k])); });
+        t.peak=Math.max(t.peak, iv(e.peak));
+        t.hours++;
+        // internal consistency of this hour's entry
+        const shrink=SHRINK_KEYS.reduce((a,k2)=>a+iv(e[k2]),0);
+        if(String(e.peak||"")!=="" && iv(e.active)+shrink !== iv(e.peak)) t.unbalanced++;
       });
       Object.keys(perTeam).forEach(team=>{
         const c=perTeam[team];
-        if(!c.hours) return;                       // nothing entered that day — not a gap
+        if(!c.hours) return;
         const dOn=dayoff.filter(r=>recDate(r)===date&&normTeam(r.team)===team);
         const uOn=unpl.filter(r=>recDate(r)===date&&normTeam(r.team)===team);
         const uniqA=(arr)=>new Set(arr.map(r=>normAgent(r.agentName)).filter(Boolean)).size;
-        const logged={
-          dayoff:uniqA(dOn.filter(isPlannedRecord)),
-          sick:uniqA(dOn.filter(r=>String(r.type||"").toLowerCase()==="sick").concat(uOn.filter(isSickRecord))),
-          emergency:uniqA(dOn.filter(r=>String(r.type||"").toLowerCase()==="emergency")),
-          unpl:uniqA(uOn),
-        };
-        const gap={
-          dayoff:Math.max(0,c.dayoff-logged.dayoff), sick:Math.max(0,c.sick-logged.sick),
-          emergency:Math.max(0,c.emergency-logged.emergency), unpl:Math.max(0,c.unpl-logged.unpl),
-        };
-        const total=gap.dayoff+gap.sick+gap.emergency+gap.unpl;
-        rows.push({date,team,tl:tlMap[team]||"—",claimed:c,logged,gap,totalGap:total,peak:c.peak,hours:c.hours});
+        const logged={}, gap={}; let total=0;
+        KC_MATCH.forEach(m=>{
+          const fromDayoff = m.dayoffType ? dOn.filter(r=>m.dayoffType.indexOf(String(r.type||"").toLowerCase())>=0) : [];
+          const fromUnpl   = m.unplCat    ? uOn.filter(r=>m.unplCat.indexOf(leaveCategory(r.leaveType))>=0) : [];
+          logged[m.k]=uniqA(fromDayoff.concat(fromUnpl));
+          gap[m.k]=Math.max(0,(c.claim[m.k]||0)-logged[m.k]);
+          total+=gap[m.k];
+        });
+        rows.push({date,team,tl:tlMap[team]||"—",claim:c.claim,logged,gap,totalGap:total,
+                   peak:c.peak,hours:c.hours,unbalanced:c.unbalanced,budget:budgetOf[team]||0});
       });
     });
     const byTL={};
     rows.forEach(r=>{
-      const t=byTL[r.tl]||(byTL[r.tl]={tl:r.tl,teams:new Set(),days:0,gapDays:0,missing:0,
-        miss:{dayoff:0,sick:0,emergency:0,unpl:0}});
+      const t=byTL[r.tl]||(byTL[r.tl]={tl:r.tl,teams:new Set(),days:0,gapDays:0,missing:0,unbalanced:0,miss:{}});
       t.teams.add(r.team); t.days++; if(r.totalGap>0) t.gapDays++;
-      t.missing+=r.totalGap;
-      t.miss.dayoff+=r.gap.dayoff; t.miss.sick+=r.gap.sick;
-      t.miss.emergency+=r.gap.emergency; t.miss.unpl+=r.gap.unpl;
+      t.missing+=r.totalGap; t.unbalanced+=r.unbalanced;
+      KC_MATCH.forEach(m=>{ t.miss[m.k]=(t.miss[m.k]||0)+r.gap[m.k]; });
     });
     const tls=Object.values(byTL).map(t=>({...t,teams:[...t.teams].join(", "),
       compliance:t.days?Math.round((t.days-t.gapDays)/t.days*100):100}))
@@ -612,13 +623,16 @@ const SectionTitle = ({children})=><div style={s.ctitle}>{children}</div>;
     const mine=isCEO?D.tls:D.tls.filter(t=>t.tl===user.name);
     const rows=isCEO?D.rows:D.rows.filter(r=>r.tl===user.name);
     const totalMissing=mine.reduce((a,t)=>a+t.missing,0);
+    const totalUnbal=mine.reduce((a,t)=>a+t.unbalanced,0);
     const offenders=mine.filter(t=>t.missing>0);
+    const gapRows=rows.filter(r=>r.totalGap>0||r.unbalanced>0);
     return (
       <div>
         <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>🛡 TL Data-Entry Compliance</div>
         <div style={{fontSize:12.5,color:C.sub,marginBottom:18}}>
-          Compares the headcount each TL types into Hourly Input against the records they actually logged.
-          A gap means people were reported out, but no Day Off / Unplanned record exists for them.
+          Every number a TL types into Hourly Input should have a matching request. Each shrinkage
+          bucket is checked against its own request type — Day Off → planned request, Part Time → part-time
+          request, Sick → sick request, ISP / Tech / Late / NSNC → unplanned events. Updates live.
         </div>
         <div style={s.card()}>
           <SectionTitle>Period</SectionTitle>
@@ -635,64 +649,71 @@ const SectionTitle = ({children})=><div style={s.ctitle}>{children}</div>;
         </div>
 
         {totalMissing>0?<div style={s.alert(C.red)}>
-          ⚠️ <strong>{totalMissing}</strong> record{totalMissing===1?"":"s"} appear to be missing across <strong>{offenders.length}</strong> TL{offenders.length===1?"":"s"} in this period.
-        </div>:<div style={s.alert(C.green)}>✅ No data-entry gaps detected in this period.</div>}
+          ⚠️ <strong>{totalMissing}</strong> request{totalMissing===1?"":"s"} missing across <strong>{offenders.length}</strong> TL{offenders.length===1?"":"s"}.
+        </div>:<div style={s.alert(C.green)}>✅ Every hourly figure has a matching request in this period.</div>}
+        {totalUnbal>0?<div style={s.alert(C.amber)}>
+          🧮 <strong>{totalUnbal}</strong> hourly entr{totalUnbal===1?"y":"ies"} don't add up (active + shrinkage ≠ peak). That's an arithmetic problem, not a missing request.
+        </div>:null}
 
         <div style={s.kpiGrid}>
           <KPI label="Team-days checked" value={rows.length} color={C.blue}/>
           <KPI label="Days with gaps" value={rows.filter(r=>r.totalGap>0).length} color={C.amber}/>
-          <KPI label="Missing records" value={totalMissing} color={C.red}/>
-          <KPI label="TLs with gaps" value={offenders.length} color={C.purple} sub={`of ${mine.length}`}/>
+          <KPI label="Missing requests" value={totalMissing} color={C.red}/>
+          <KPI label="Unbalanced entries" value={totalUnbal} color={C.purple}/>
+          <KPI label="TLs with gaps" value={offenders.length} color={C.blue} sub={`of ${mine.length}`}/>
         </div>
 
         <div style={s.card()}>
-          <SectionTitle>By Team Leader</SectionTitle>
+          <SectionTitle>By Team Leader — missing requests per category</SectionTitle>
           {mine.length===0?<div style={{fontSize:12.5,color:C.sub}}>No hourly data in this period.</div>:(
+          <div style={{overflowX:"auto"}}>
           <table style={s.tbl}>
-            <thead><tr><th style={s.th}>TL</th><th style={s.th}>Teams</th><th style={s.th}>Days</th><th style={s.th}>Gap days</th>
-              <th style={s.th}>Day Off</th><th style={s.th}>Sick</th><th style={s.th}>Emerg.</th><th style={s.th}>Unplanned</th>
-              <th style={s.th}>Missing</th><th style={s.th}>Compliance</th></tr></thead>
+            <thead><tr><th style={s.th}>TL</th><th style={s.th}>Teams</th><th style={s.th}>Days</th>
+              {KC_MATCH.map(m=><th key={m.k} style={s.th}>{m.label}</th>)}
+              <th style={s.th}>Total</th><th style={s.th}>Unbal.</th><th style={s.th}>Compliance</th></tr></thead>
             <tbody>{mine.map(t=>(
               <tr key={t.tl}>
                 <td style={s.td}><strong>{t.tl}</strong></td>
                 <td style={{...s.td,color:C.sub}}>{t.teams}</td>
                 <td style={s.td}>{t.days}</td>
-                <td style={{...s.td,color:t.gapDays?C.amber:C.sub}}>{t.gapDays}</td>
-                <td style={s.td}>{t.miss.dayoff||"—"}</td>
-                <td style={s.td}>{t.miss.sick||"—"}</td>
-                <td style={s.td}>{t.miss.emergency||"—"}</td>
-                <td style={s.td}>{t.miss.unpl||"—"}</td>
+                {KC_MATCH.map(m=><td key={m.k} style={{...s.td,color:t.miss[m.k]?C.red:C.sub}}>{t.miss[m.k]||"—"}</td>)}
                 <td style={{...s.td,color:t.missing?C.red:C.green,fontWeight:700}}>{t.missing}</td>
+                <td style={{...s.td,color:t.unbalanced?C.amber:C.sub}}>{t.unbalanced||"—"}</td>
                 <td style={s.td}><Badge text={t.compliance>=95?"✅ "+t.compliance+"%":(t.compliance>=80?"⚠ "+t.compliance+"%":"❌ "+t.compliance+"%")}/></td>
               </tr>))}
             </tbody>
-          </table>)}
+          </table></div>)}
         </div>
 
         <div style={s.card()}>
-          <SectionTitle>Day-by-day detail — claimed vs logged ({rows.filter(r=>r.totalGap>0).length} with gaps)</SectionTitle>
+          <SectionTitle>Day-by-day — claimed in Hourly vs logged as requests ({gapRows.length} to review)</SectionTitle>
           <div style={{overflowX:"auto",maxHeight:460,overflowY:"auto"}}>
             <table style={s.tbl}>
-              <thead><tr><th style={s.th}>Date</th><th style={s.th}>Team</th><th style={s.th}>TL</th>
-                <th style={s.th}>Day Off c/l</th><th style={s.th}>Sick c/l</th><th style={s.th}>Emerg. c/l</th>
-                <th style={s.th}>Unplanned c/l</th><th style={s.th}>Missing</th></tr></thead>
-              <tbody>{rows.filter(r=>r.totalGap>0).slice(0,250).map(r=>{
-                const cell=(c,l,g)=><td style={{...s.td,color:g?C.red:C.text}}>{c} / {l}{g?<span style={{color:C.red,fontWeight:700}}> (−{g})</span>:null}</td>;
-                return (<tr key={r.date+r.team}>
+              <thead><tr><th style={s.th}>Date</th><th style={s.th}>Team</th><th style={s.th}>TL</th><th style={s.th}>Peak</th>
+                {KC_MATCH.map(m=><th key={m.k} style={s.th}>{m.label}</th>)}
+                <th style={s.th}>Missing</th></tr></thead>
+              <tbody>{gapRows.slice(0,250).map(r=>(
+                <tr key={r.date+r.team}>
                   <td style={s.td}>{r.date}</td>
                   <td style={s.td}><strong style={{color:C.blue}}>{r.team}</strong></td>
                   <td style={{...s.td,color:C.sub}}>{r.tl}</td>
-                  {cell(r.claimed.dayoff,r.logged.dayoff,r.gap.dayoff)}
-                  {cell(r.claimed.sick,r.logged.sick,r.gap.sick)}
-                  {cell(r.claimed.emergency,r.logged.emergency,r.gap.emergency)}
-                  {cell(r.claimed.unpl,r.logged.unpl,r.gap.unpl)}
-                  <td style={{...s.td,color:C.red,fontWeight:700}}>{r.totalGap}</td>
-                </tr>);})}
+                  <td style={{...s.td,color:C.sub}}>{r.peak}{r.budget?<span style={{color:C.sub}}> / {r.budget}</span>:null}
+                    {r.unbalanced?<span style={{color:C.amber}} title="hours where active + shrinkage ≠ peak"> ⚠{r.unbalanced}</span>:null}</td>
+                  {KC_MATCH.map(m=>(
+                    <td key={m.k} style={{...s.td,color:r.gap[m.k]?C.red:C.text}}>
+                      {(r.claim[m.k]||0)} / {r.logged[m.k]}
+                      {r.gap[m.k]?<strong style={{color:C.red}}> (−{r.gap[m.k]})</strong>:null}
+                    </td>))}
+                  <td style={{...s.td,color:C.red,fontWeight:700}}>{r.totalGap||"—"}</td>
+                </tr>))}
               </tbody>
             </table>
-            {rows.filter(r=>r.totalGap>0).length===0?<div style={{fontSize:12.5,color:C.sub}}>No gaps — every claimed absence has a matching record.</div>:null}
+            {gapRows.length===0?<div style={{fontSize:12.5,color:C.sub}}>Nothing to review — every claim has a matching request.</div>:null}
           </div>
-          <div style={{fontSize:11,color:C.sub,marginTop:8}}>c/l = claimed in Hourly Input / logged as records. Claimed uses the day's peak hour.</div>
+          <div style={{fontSize:11,color:C.sub,marginTop:8}}>
+            Each cell is <em>claimed in Hourly Input / logged as requests</em>. Claimed uses the day's peak hour;
+            logged counts distinct agents. Peak column shows peak / team budget. Shadowing is excluded — it needs no request.
+          </div>
         </div>
       </div>
     );
@@ -1181,7 +1202,7 @@ function DayOffControl({user,activeCampaign,isCEO}){
             <div>
               <Field label="Agent Name"><Input value={form.agentName} onChange={e=>setForm({...form,agentName:e.target.value})} placeholder="Full name"/></Field>
               <Field label="Team"><Select value={form.team} onChange={e=>setForm({...form,team:e.target.value})} disabled={!!user.team&&user.role==="tl"}>{teams.map(t=><option key={t}>{t}</option>)}</Select></Field>
-              <Field label="Type"><Select value={form.type} onChange={e=>setForm({...form,type:e.target.value})}><option>Planned</option><option>Emergency</option><option>Sick</option></Select></Field>
+              <Field label="Type"><Select value={form.type} onChange={e=>setForm({...form,type:e.target.value})}><option>Planned</option><option>Part Time</option><option>Emergency</option><option>Sick</option></Select></Field>
             </div>
             <div>
               <Field label="Request Date"><Input type="date" value={form.requestDate} onChange={e=>setForm({...form,requestDate:e.target.value})}/></Field>
