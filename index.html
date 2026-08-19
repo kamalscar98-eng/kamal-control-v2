@@ -92,6 +92,7 @@ const { useState, useEffect, useMemo } = React;
 // ───────────── CONSTANTS ─────────────
 const HOURS = ["9:00 AM", "10:00 AM","11:00 AM","12:00 PM","1:00 PM","2:00 PM","3:00 PM","4:00 PM","5:00 PM","6:00 PM","7:00 PM"];
 const SHRINK_KEYS = ["isp","emergency","dayoff","tech","late","nsnc","sick","shadowing"];
+const U_TYPES = ["Sick","Late login","ISP / Internet","Power outage","Tech / Hardware","Emergency","No show / NSNC","Early leave / logout","Part time","Exam / Study"];
 const SHRINK_LABELS = {isp:"ISP/Outage",emergency:"Emergency",dayoff:"Day Off",tech:"Tech Issues",late:"Late/PT",nsnc:"NSNC",sick:"Sick",shadowing:"Shadowing"};
 const FILL_TARGET_DEFAULT = 87.2;
 const VERSION = "2.2";
@@ -280,6 +281,476 @@ const Input = ({style,...props})=><input style={{...s.inp,...(style||{})}} {...p
 const Select = ({children,style,...props})=><select style={{...s.sel,...(style||{})}} {...props}>{children}</select>;
 const Btn = ({variant="primary",children,style,...props})=><button style={{...s.btn(variant),...(style||{})}} {...props}>{children}</button>;
 const SectionTitle = ({children})=><div style={s.ctitle}>{children}</div>;
+
+  // ═══════════ ANALYTICS ENGINE (shared, read-only — no writes, no new keys) ═══════════
+  const normTeam  = (t)=>{ const v=String(t||"").trim().replace(/\s+/g," "); return v||"—"; };
+  const normAgent = (a)=>String(a||"").trim().replace(/\s+/g," ");
+
+  // Buckets the free-text Unplanned "leaveType" for ANALYTICS ONLY.
+  // Never used for the sick-leave policy: a family member being ill is not the agent being sick.
+  const A_FAMILY=/\b(mom|mother|wife|husband|dad|father|sister|brother|son|daughter|grandma|grandmother|grandpa|aunt|uncle|sibling|siblings|family|relative|cat|friend|neighbour|neighbor)\b/i;
+  function leaveCategory(raw){
+    const t=String(raw||"").trim(); if(!t) return "Unspecified";
+    const l=t.toLowerCase();
+    if(/no ?show|nsnc|abandon/.test(l)) return "No show / NSNC";
+    if(/(sick|migraine|tonsil|fever|surgery|hospital|health issue|doctor|dr appt|dr\. appt|dr appointment)/.test(l) && !A_FAMILY.test(l)) return "Sick";
+    if(/late ?log|lateness|overslept|oversleep|\blt\b|logging in late|logged in late|late for/.test(l)) return "Late login";
+    if(/isp|internet|connection|router|fiber|landline/.test(l)) return "ISP / Internet";
+    if(/power ?outage|\bpo\b|electric/.test(l)) return "Power outage";
+    if(/tech|laptop|\bpc\b|computer|headset|hardware|device|microphone|\bmic\b|browser|charger/.test(l)) return "Tech / Hardware";
+    if(/\bpt\b|part ?time/.test(l)) return "Part time";
+    if(/emerg|bereav|passing|death|funeral|accident/.test(l)) return "Emergency";
+    if(/exam|college|university/.test(l)) return "Exam / Study";
+    if(/early ?le|log(ged)? out|out mid|left early|logout|early leave/.test(l)) return "Early leave / logout";
+    if(/outage/.test(l)) return "ISP / Internet";
+    return "Other";
+  }
+
+  const A_SHIFT=(n)=>{ const d=new Date(); d.setDate(d.getDate()+n);
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; };
+  const A_RANGES=[["all","All time"],["today","Today"],["7d","Last 7 days"],["30d","Last 30 days"],["90d","Last 90 days"],["tm","This month"],["lm","Last month"],["ty","This year"],["custom","Custom range…"]];
+  function A_resolve(f){
+    const t=todayStr(), yr=t.slice(0,4), mo=t.slice(0,7);
+    switch(f.range){
+      case "today": return {from:t,to:t};
+      case "7d":    return {from:A_SHIFT(-6), to:t};
+      case "30d":   return {from:A_SHIFT(-29),to:t};
+      case "90d":   return {from:A_SHIFT(-89),to:t};
+      case "tm":    return {from:mo+"-01", to:t};
+      case "lm": {  const d=new Date(Number(yr), Number(mo.slice(5,7))-1, 1); d.setMonth(d.getMonth()-1);
+                    const pm=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+                    const last=new Date(d.getFullYear(), d.getMonth()+1, 0).getDate();
+                    return {from:pm+"-01", to:`${pm}-${String(last).padStart(2,"0")}`}; }
+      case "ty":    return {from:yr+"-01-01", to:t};
+      case "custom":return {from:f.from||"", to:f.to||""};
+      default:      return {from:"", to:""};
+    }
+  }
+  const A_DEF=()=>({range:"tm",from:"",to:"",team:"all",agent:"all",cat:"all",q:""});
+
+  const A_KINDS={
+    dayoff:   {date:r=>r.dayoffDate||r.requestDate||"",              cat:r=>r.type||"—",                catLabel:"Type",           noun:"requests"},
+    unplanned:{date:r=>r.date||"",                                   cat:r=>leaveCategory(r.leaveType), catLabel:"Category (auto)",noun:"events"},
+    attrition:{date:r=>r.lastWorkingDay||r.dateLogged||r.noticeDate||"", cat:r=>r.departureType||"—",   catLabel:"Departure Type", noun:"departures"},
+  };
+
+  const BarList=({rows,color=C.blue,limit=12,empty="No data in this range"})=>{
+    if(!rows||!rows.length) return <div style={{fontSize:12.5,color:C.sub}}>{empty}</div>;
+    const max=Math.max.apply(null,rows.map(r=>r[1]))||1;
+    return (<div>{rows.slice(0,limit).map(([k,v])=>(
+      <div key={k} style={{marginBottom:9}}>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:12.5,marginBottom:3,gap:10}}>
+          <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{k}</span>
+          <strong style={{color}}>{v}</strong>
+        </div>
+        <div style={{height:6,background:"#0d1220",borderRadius:4,overflow:"hidden"}}>
+          <div style={{width:`${Math.round(v/max*100)}%`,height:"100%",background:color,borderRadius:4}}/>
+        </div>
+      </div>))}</div>);
+  };
+
+  function A_csv(rows,name){
+    if(!rows.length) return;
+    const cols=[...new Set(rows.reduce((a,r)=>a.concat(Object.keys(r)),[]))];
+    const esc=v=>`"${String(v==null?"":v).replace(/"/g,'""')}"`;
+    const body=[cols.join(",")].concat(rows.map(r=>cols.map(c=>esc(r[c])).join(","))).join("\n");
+    const blob=new Blob(["﻿"+body],{type:"text/csv;charset=utf-8;"});
+    const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=name;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+  }
+
+  function AnalyticsPanel({rows,kind,isCEO}){
+    const K=A_KINDS[kind];
+    const [f,setF]=useState(A_DEF);
+    const src=Array.isArray(rows)?rows:[];
+    const teams  = useMemo(()=>[...new Set(src.map(r=>normTeam(r.team)))].sort(),[src]);
+    const agents = useMemo(()=>[...new Set(src.map(r=>normAgent(r.agentName)).filter(Boolean))].sort(),[src]);
+    const cats   = useMemo(()=>[...new Set(src.map(K.cat).filter(Boolean))].sort(),[src,kind]);
+
+    const A=useMemo(()=>{
+      const R=A_resolve(f), q=f.q.trim().toLowerCase();
+      const sel=src.filter(r=>{
+        const d=K.date(r);
+        if(R.from && (!d || d<R.from)) return false;
+        if(R.to   && (!d || d>R.to))   return false;
+        if(f.team!=="all"  && normTeam(r.team)!==f.team) return false;
+        if(f.agent!=="all" && normAgent(r.agentName)!==f.agent) return false;
+        if(f.cat!=="all"   && K.cat(r)!==f.cat) return false;
+        if(q && JSON.stringify(r).toLowerCase().indexOf(q)===-1) return false;
+        return true;
+      });
+      const tally=(fn)=>{const m={};sel.forEach(r=>{const k=fn(r)||"—";m[k]=(m[k]||0)+1;});return Object.entries(m).sort((a,b)=>b[1]-a[1]);};
+      const days=Object.entries(sel.reduce((m,r)=>{const d=K.date(r);if(d)m[d]=(m[d]||0)+1;return m;},{})).sort();
+      const wd=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"], wm={};
+      sel.forEach(r=>{const d=K.date(r); if(!d) return; const x=new Date(d+"T00:00:00"); if(!isNaN(x)) { const n=wd[x.getDay()]; wm[n]=(wm[n]||0)+1; }});
+      return { sel, range:R,
+        byTeam:tally(r=>normTeam(r.team)), byAgent:tally(r=>normAgent(r.agentName)), byCat:tally(K.cat),
+        byMonth:Object.entries(sel.reduce((m,r)=>{const d=K.date(r);const k=d?d.slice(0,7):"";if(k)m[k]=(m[k]||0)+1;return m;},{})).sort(),
+        byDay:days, byWeekday:wd.filter(n=>wm[n]).map(n=>[n,wm[n]]),
+        uniqueAgents:new Set(sel.map(r=>normAgent(r.agentName)).filter(Boolean)).size,
+        peakDay:days.slice().sort((a,b)=>b[1]-a[1])[0]||null };
+    },[src,f,kind]);
+
+    const set=(k,v)=>setF(Object.assign({},f,{[k]:v}));
+    const pct=src.length?Math.round(A.sel.length/src.length*100):0;
+
+    return (
+      <div>
+        <div style={s.card()}>
+          <SectionTitle>Filters</SectionTitle>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(148px,1fr))",gap:12}}>
+            <Field label="Date range">
+              <Select value={f.range} onChange={e=>set("range",e.target.value)}>
+                {A_RANGES.map(([id,l])=><option key={id} value={id}>{l}</option>)}
+              </Select>
+            </Field>
+            {f.range==="custom"?<Field label="From"><Input type="date" value={f.from} onChange={e=>set("from",e.target.value)}/></Field>:null}
+            {f.range==="custom"?<Field label="To"><Input type="date" value={f.to} onChange={e=>set("to",e.target.value)}/></Field>:null}
+            <Field label="Team">
+              <Select value={f.team} onChange={e=>set("team",e.target.value)}>
+                <option value="all">All teams</option>
+                {teams.map(t=><option key={t} value={t}>{t}</option>)}
+              </Select>
+            </Field>
+            <Field label="Agent">
+              <Select value={f.agent} onChange={e=>set("agent",e.target.value)}>
+                <option value="all">All agents ({agents.length})</option>
+                {agents.map(a=><option key={a} value={a}>{a}</option>)}
+              </Select>
+            </Field>
+            <Field label={K.catLabel}>
+              <Select value={f.cat} onChange={e=>set("cat",e.target.value)}>
+                <option value="all">All</option>
+                {cats.map(c=><option key={c} value={c}>{c}</option>)}
+              </Select>
+            </Field>
+            <Field label="Search"><Input placeholder="name, notes, anything…" value={f.q} onChange={e=>set("q",e.target.value)}/></Field>
+          </div>
+          <div style={{fontSize:11.5,color:C.sub,display:"flex",gap:14,flexWrap:"wrap",alignItems:"center"}}>
+            <span>{A.range.from||"start"} → {A.range.to||"today"}</span>
+            <span>·</span>
+            <span>{A.sel.length} of {src.length} {K.noun} ({pct}%)</span>
+            <span style={{color:C.blue,cursor:"pointer"}} onClick={()=>setF(A_DEF())}>reset</span>
+            <span style={{color:C.green,cursor:"pointer"}} onClick={()=>A_csv(A.sel,`${kind}_${A.range.from||"all"}_${A.range.to||"today"}.csv`)}>⬇ export CSV</span>
+          </div>
+        </div>
+
+        <div style={s.kpiGrid}>
+          <KPI label={"Total "+K.noun} value={A.sel.length} color={C.blue} sub={`${pct}% of all records`}/>
+          <KPI label="Agents involved" value={A.uniqueAgents} color={C.purple}/>
+          <KPI label="Teams involved" value={A.byTeam.length} color={C.amber}/>
+          <KPI label="Busiest day" value={A.peakDay?A.peakDay[1]:0} color={C.red} sub={A.peakDay?A.peakDay[0]:"—"}/>
+          <KPI label="Daily average" value={A.byDay.length?(A.sel.length/A.byDay.length).toFixed(1):"0"} color={C.green} sub={`${A.byDay.length} active days`}/>
+          <KPI label={"Top "+(K.catLabel||"category")} value={A.byCat.length?A.byCat[0][1]:0} color={C.blue} sub={A.byCat.length?A.byCat[0][0]:"—"}/>
+        </div>
+
+        <div style={s.g2}>
+          <div style={s.card()}><SectionTitle>By Team</SectionTitle><BarList rows={A.byTeam} color={C.blue}/></div>
+          <div style={s.card()}><SectionTitle>By {K.catLabel}</SectionTitle><BarList rows={A.byCat} color={C.amber}/></div>
+        </div>
+        <div style={s.g2}>
+          <div style={s.card()}><SectionTitle>Top Agents</SectionTitle><BarList rows={A.byAgent} color={C.purple} limit={15}/></div>
+          <div style={s.card()}>
+            <SectionTitle>Trend by Month</SectionTitle><BarList rows={A.byMonth} color={C.green}/>
+            <div style={{height:14}}/>
+            <SectionTitle>By Weekday</SectionTitle><BarList rows={A.byWeekday} color={C.blue} limit={7}/>
+          </div>
+        </div>
+
+        <div style={s.card()}>
+          <SectionTitle>Matching records ({A.sel.length})</SectionTitle>
+          {A.sel.length===0?<div style={{fontSize:12.5,color:C.sub}}>Nothing matches these filters.</div>:(
+            <div style={{overflowX:"auto",maxHeight:420,overflowY:"auto"}}>
+              <table style={s.tbl}>
+                <thead><tr><th style={s.th}>Date</th><th style={s.th}>Agent</th><th style={s.th}>Team</th><th style={s.th}>{K.catLabel}</th><th style={s.th}>Logged by</th></tr></thead>
+                <tbody>{A.sel.slice().sort((a,b)=>String(K.date(b)).localeCompare(String(K.date(a)))).slice(0,300).map(r=>(
+                  <tr key={r.id}>
+                    <td style={s.td}>{K.date(r)||"—"}</td>
+                    <td style={s.td}><strong>{normAgent(r.agentName)||"—"}</strong></td>
+                    <td style={s.td}>{normTeam(r.team)}</td>
+                    <td style={s.td}>{K.cat(r)}</td>
+                    <td style={{...s.td,color:C.sub}}>{r.submittedBy||"—"}</td>
+                  </tr>))}
+                </tbody>
+              </table>
+              {A.sel.length>300?<div style={{fontSize:11.5,color:C.sub,marginTop:8}}>Showing first 300 — use filters or export CSV for the rest.</div>:null}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ═══════════ TL COMPLIANCE + AGENT WATCHLIST (read-only, derived) ═══════════
+
+  // Enumerate hourly day-keys already cached locally. Read-only.
+  function hourlyDates(cid){
+    const pre=cKey(cid,"hourly")+"_"; const out=[];
+    try{ for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(k&&k.indexOf(pre)===0) out.push(k.slice(pre.length)); } }catch(e){}
+    return out.filter(d=>/^\d{4}-\d{2}-\d{2}$/.test(d)).sort();
+  }
+  const iv=(x)=>{ const n=parseInt(x,10); return isNaN(n)?0:n; };
+
+  // A sick day only counts when it was recorded unambiguously:
+  //   • Day Off record with type = "Sick"  (picked from a dropdown), or
+  //   • Unplanned record whose Leave Type is exactly "Sick"
+  // Free-text like "her mom is sick" is deliberately excluded.
+  const isSickRecord = (r)=> String(r.type||"").toLowerCase()==="sick"
+                          || String(r.leaveType||"").trim().toLowerCase()==="sick";
+  const isPlannedRecord = (r)=> String(r.type||"").toLowerCase()==="planned";
+  const recDate = (r)=> r.dayoffDate||r.date||r.requestDate||"";
+  const ym = (d)=>String(d||"").slice(0,7);
+
+  function teamToTL(){
+    const users=LS.get("ko_users",DEFAULT_USERS)||[];
+    const m={};
+    users.forEach(u=>{ if(u&&u.team&&u.active!==false) m[normTeam(u.team)]=u.name; });
+    return m;
+  }
+
+  // ───────── Feature 2: are TLs actually logging what their headcount claims? ─────────
+  function buildCompliance(cid, from, to){
+    const dayoff=LS.get(cKey(cid,"dayoff"),[])||[];
+    const unpl  =LS.get(cKey(cid,"unplanned"),[])||[];
+    const tlMap =teamToTL();
+    const rows=[];
+    hourlyDates(cid).forEach(date=>{
+      if(from&&date<from) return;
+      if(to&&date>to) return;
+      const day=LS.get(cKey(cid,"hourly")+"_"+date,{})||{};
+      const perTeam={};
+      Object.keys(day).forEach(k=>{
+        const parts=k.split("|"); if(parts.length<3) return;
+        const team=normTeam(parts[2]); const e=day[k]||{};
+        const t=perTeam[team]||(perTeam[team]={dayoff:0,sick:0,emergency:0,unpl:0,hours:0,peak:0});
+        // headcount claims are per-hour snapshots: the day's true figure is the peak
+        t.dayoff=Math.max(t.dayoff,iv(e.dayoff)); t.sick=Math.max(t.sick,iv(e.sick));
+        t.emergency=Math.max(t.emergency,iv(e.emergency));
+        t.unpl=Math.max(t.unpl, iv(e.isp)+iv(e.late)+iv(e.nsnc)+iv(e.tech));
+        t.peak=Math.max(t.peak,iv(e.peak));
+        if(e.peak!==""&&e.peak!=null) t.hours++;
+      });
+      Object.keys(perTeam).forEach(team=>{
+        const c=perTeam[team];
+        if(!c.hours) return;                       // nothing entered that day — not a gap
+        const dOn=dayoff.filter(r=>recDate(r)===date&&normTeam(r.team)===team);
+        const uOn=unpl.filter(r=>recDate(r)===date&&normTeam(r.team)===team);
+        const logged={
+          dayoff:dOn.filter(isPlannedRecord).length,
+          sick:dOn.filter(r=>String(r.type||"").toLowerCase()==="sick").length+uOn.filter(isSickRecord).length,
+          emergency:dOn.filter(r=>String(r.type||"").toLowerCase()==="emergency").length,
+          unpl:uOn.length,
+        };
+        const gap={
+          dayoff:Math.max(0,c.dayoff-logged.dayoff), sick:Math.max(0,c.sick-logged.sick),
+          emergency:Math.max(0,c.emergency-logged.emergency), unpl:Math.max(0,c.unpl-logged.unpl),
+        };
+        const total=gap.dayoff+gap.sick+gap.emergency+gap.unpl;
+        rows.push({date,team,tl:tlMap[team]||"—",claimed:c,logged,gap,totalGap:total,peak:c.peak,hours:c.hours});
+      });
+    });
+    const byTL={};
+    rows.forEach(r=>{
+      const t=byTL[r.tl]||(byTL[r.tl]={tl:r.tl,teams:new Set(),days:0,gapDays:0,missing:0,
+        miss:{dayoff:0,sick:0,emergency:0,unpl:0}});
+      t.teams.add(r.team); t.days++; if(r.totalGap>0) t.gapDays++;
+      t.missing+=r.totalGap;
+      t.miss.dayoff+=r.gap.dayoff; t.miss.sick+=r.gap.sick;
+      t.miss.emergency+=r.gap.emergency; t.miss.unpl+=r.gap.unpl;
+    });
+    const tls=Object.values(byTL).map(t=>({...t,teams:[...t.teams].join(", "),
+      compliance:t.days?Math.round((t.days-t.gapDays)/t.days*100):100}))
+      .sort((a,b)=>b.missing-a.missing);
+    return {rows:rows.sort((a,b)=>b.date.localeCompare(a.date)||b.totalGap-a.totalGap), tls};
+  }
+
+  function ComplianceView({activeCampaign,user,isCEO}){
+    const [f,setF]=useState(()=>({range:"30d",from:"",to:""}));
+    const R=A_resolve(f);
+    const D=useMemo(()=>buildCompliance(activeCampaign,R.from,R.to),[activeCampaign,R.from,R.to]);
+    const mine=isCEO?D.tls:D.tls.filter(t=>t.tl===user.name);
+    const rows=isCEO?D.rows:D.rows.filter(r=>r.tl===user.name);
+    const totalMissing=mine.reduce((a,t)=>a+t.missing,0);
+    const offenders=mine.filter(t=>t.missing>0);
+    return (
+      <div>
+        <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>🛡 TL Data-Entry Compliance</div>
+        <div style={{fontSize:12.5,color:C.sub,marginBottom:18}}>
+          Compares the headcount each TL types into Hourly Input against the records they actually logged.
+          A gap means people were reported out, but no Day Off / Unplanned record exists for them.
+        </div>
+        <div style={s.card()}>
+          <SectionTitle>Period</SectionTitle>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:12}}>
+            <Field label="Date range">
+              <Select value={f.range} onChange={e=>setF({...f,range:e.target.value})}>
+                {A_RANGES.map(([id,l])=><option key={id} value={id}>{l}</option>)}
+              </Select>
+            </Field>
+            {f.range==="custom"?<Field label="From"><Input type="date" value={f.from} onChange={e=>setF({...f,from:e.target.value})}/></Field>:null}
+            {f.range==="custom"?<Field label="To"><Input type="date" value={f.to} onChange={e=>setF({...f,to:e.target.value})}/></Field>:null}
+          </div>
+          <div style={{fontSize:11.5,color:C.sub}}>{R.from||"start"} → {R.to||"today"} · {rows.length} team-days checked</div>
+        </div>
+
+        {totalMissing>0?<div style={s.alert(C.red)}>
+          ⚠️ <strong>{totalMissing}</strong> record{totalMissing===1?"":"s"} appear to be missing across <strong>{offenders.length}</strong> TL{offenders.length===1?"":"s"} in this period.
+        </div>:<div style={s.alert(C.green)}>✅ No data-entry gaps detected in this period.</div>}
+
+        <div style={s.kpiGrid}>
+          <KPI label="Team-days checked" value={rows.length} color={C.blue}/>
+          <KPI label="Days with gaps" value={rows.filter(r=>r.totalGap>0).length} color={C.amber}/>
+          <KPI label="Missing records" value={totalMissing} color={C.red}/>
+          <KPI label="TLs with gaps" value={offenders.length} color={C.purple} sub={`of ${mine.length}`}/>
+        </div>
+
+        <div style={s.card()}>
+          <SectionTitle>By Team Leader</SectionTitle>
+          {mine.length===0?<div style={{fontSize:12.5,color:C.sub}}>No hourly data in this period.</div>:(
+          <table style={s.tbl}>
+            <thead><tr><th style={s.th}>TL</th><th style={s.th}>Teams</th><th style={s.th}>Days</th><th style={s.th}>Gap days</th>
+              <th style={s.th}>Day Off</th><th style={s.th}>Sick</th><th style={s.th}>Emerg.</th><th style={s.th}>Unplanned</th>
+              <th style={s.th}>Missing</th><th style={s.th}>Compliance</th></tr></thead>
+            <tbody>{mine.map(t=>(
+              <tr key={t.tl}>
+                <td style={s.td}><strong>{t.tl}</strong></td>
+                <td style={{...s.td,color:C.sub}}>{t.teams}</td>
+                <td style={s.td}>{t.days}</td>
+                <td style={{...s.td,color:t.gapDays?C.amber:C.sub}}>{t.gapDays}</td>
+                <td style={s.td}>{t.miss.dayoff||"—"}</td>
+                <td style={s.td}>{t.miss.sick||"—"}</td>
+                <td style={s.td}>{t.miss.emergency||"—"}</td>
+                <td style={s.td}>{t.miss.unpl||"—"}</td>
+                <td style={{...s.td,color:t.missing?C.red:C.green,fontWeight:700}}>{t.missing}</td>
+                <td style={s.td}><Badge text={t.compliance>=95?"✅ "+t.compliance+"%":(t.compliance>=80?"⚠ "+t.compliance+"%":"❌ "+t.compliance+"%")}/></td>
+              </tr>))}
+            </tbody>
+          </table>)}
+        </div>
+
+        <div style={s.card()}>
+          <SectionTitle>Day-by-day detail — claimed vs logged ({rows.filter(r=>r.totalGap>0).length} with gaps)</SectionTitle>
+          <div style={{overflowX:"auto",maxHeight:460,overflowY:"auto"}}>
+            <table style={s.tbl}>
+              <thead><tr><th style={s.th}>Date</th><th style={s.th}>Team</th><th style={s.th}>TL</th>
+                <th style={s.th}>Day Off c/l</th><th style={s.th}>Sick c/l</th><th style={s.th}>Emerg. c/l</th>
+                <th style={s.th}>Unplanned c/l</th><th style={s.th}>Missing</th></tr></thead>
+              <tbody>{rows.filter(r=>r.totalGap>0).slice(0,250).map(r=>{
+                const cell=(c,l,g)=><td style={{...s.td,color:g?C.red:C.text}}>{c} / {l}{g?<span style={{color:C.red,fontWeight:700}}> (−{g})</span>:null}</td>;
+                return (<tr key={r.date+r.team}>
+                  <td style={s.td}>{r.date}</td>
+                  <td style={s.td}><strong style={{color:C.blue}}>{r.team}</strong></td>
+                  <td style={{...s.td,color:C.sub}}>{r.tl}</td>
+                  {cell(r.claimed.dayoff,r.logged.dayoff,r.gap.dayoff)}
+                  {cell(r.claimed.sick,r.logged.sick,r.gap.sick)}
+                  {cell(r.claimed.emergency,r.logged.emergency,r.gap.emergency)}
+                  {cell(r.claimed.unpl,r.logged.unpl,r.gap.unpl)}
+                  <td style={{...s.td,color:C.red,fontWeight:700}}>{r.totalGap}</td>
+                </tr>);})}
+              </tbody>
+            </table>
+            {rows.filter(r=>r.totalGap>0).length===0?<div style={{fontSize:12.5,color:C.sub}}>No gaps — every claimed absence has a matching record.</div>:null}
+          </div>
+          <div style={{fontSize:11,color:C.sub,marginTop:8}}>c/l = claimed in Hourly Input / logged as records. Claimed uses the day's peak hour.</div>
+        </div>
+      </div>
+    );
+  }
+
+  // ───────── Feature 3: agent watchlist (3+ sick, 5+ planned in a month) ─────────
+  const SICK_LIMIT=3, PLANNED_LIMIT=5;
+  function buildWatchlist(cid, monthFilter){
+    const dayoff=LS.get(cKey(cid,"dayoff"),[])||[];
+    const unpl  =LS.get(cKey(cid,"unplanned"),[])||[];
+    const all=dayoff.concat(unpl);
+    const sick={}, planned={};
+    all.forEach(r=>{
+      const a=normAgent(r.agentName); const m=ym(recDate(r)); if(!a||!m) return;
+      if(monthFilter&&monthFilter!=="all"&&m!==monthFilter) return;
+      if(isSickRecord(r)){ const k=a+"||"+m; (sick[k]=sick[k]||{agent:a,month:m,team:normTeam(r.team),items:[]}).items.push(r); }
+      if(isPlannedRecord(r)){ const k=a+"||"+m; (planned[k]=planned[k]||{agent:a,month:m,team:normTeam(r.team),items:[]}).items.push(r); }
+    });
+    const pick=(obj,limit)=>Object.values(obj).map(v=>({...v,count:v.items.length}))
+      .filter(v=>v.count>=limit).sort((a,b)=>b.month.localeCompare(a.month)||b.count-a.count);
+    const months=[...new Set(all.map(r=>ym(recDate(r))).filter(Boolean))].sort().reverse();
+    return {sick:pick(sick,SICK_LIMIT), planned:pick(planned,PLANNED_LIMIT), months};
+  }
+
+  function WatchlistView({activeCampaign,user,isCEO}){
+    const thisMonth=todayStr().slice(0,7);
+    const [month,setMonth]=useState(thisMonth);
+    const W=useMemo(()=>buildWatchlist(activeCampaign,month),[activeCampaign,month]);
+    const tlMap=teamToTL();
+    const mineOnly=(arr)=>isCEO?arr:arr.filter(x=>tlMap[x.team]===user.name||x.team===normTeam(user.team));
+    const sick=mineOnly(W.sick), planned=mineOnly(W.planned);
+    const Card=({title,rows,limit,color,note})=>(
+      <div style={s.card()}>
+        <SectionTitle>{title} — {rows.length} agent{rows.length===1?"":"s"}</SectionTitle>
+        {rows.length===0?<div style={{fontSize:12.5,color:C.sub}}>None. ✅</div>:(
+          <table style={s.tbl}>
+            <thead><tr><th style={s.th}>Agent</th><th style={s.th}>Team</th><th style={s.th}>TL</th><th style={s.th}>Month</th><th style={s.th}>Count</th><th style={s.th}>Dates</th></tr></thead>
+            <tbody>{rows.map(r=>(
+              <tr key={r.agent+r.month}>
+                <td style={s.td}><strong>{r.agent}</strong></td>
+                <td style={s.td}>{r.team}</td>
+                <td style={{...s.td,color:C.sub}}>{tlMap[r.team]||"—"}</td>
+                <td style={s.td}>{r.month}</td>
+                <td style={{...s.td,color,fontWeight:700}}>{r.count} <span style={{color:C.sub,fontWeight:400}}>/ {limit}</span></td>
+                <td style={{...s.td,color:C.sub,fontSize:11.5}}>{r.items.map(x=>recDate(x)).sort().join(", ")}</td>
+              </tr>))}
+            </tbody>
+          </table>)}
+        {note?<div style={{fontSize:11,color:C.sub,marginTop:8}}>{note}</div>:null}
+      </div>
+    );
+    return (
+      <div>
+        <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>🚨 Agent Watchlist</div>
+        <div style={{fontSize:12.5,color:C.sub,marginBottom:18}}>Updates automatically as records are entered. {isCEO?"All teams.":"Your team only."}</div>
+        {sick.length>0?<div style={s.alert(C.red)}>
+          🚨 <strong>{sick.length}</strong> agent{sick.length===1?"":"s"} reached <strong>{SICK_LIMIT}+ sick days</strong> in a month — company policy review required.
+        </div>:null}
+        {planned.length>0?<div style={s.alert(C.amber)}>
+          ⚠️ <strong>{planned.length}</strong> agent{planned.length===1?"":"s"} at <strong>{PLANNED_LIMIT}+ planned days off</strong> in a month.
+        </div>:null}
+        {sick.length===0&&planned.length===0?<div style={s.alert(C.green)}>✅ No agents over threshold for {month==="all"?"any month":month}.</div>:null}
+        <div style={s.card()}>
+          <SectionTitle>Month</SectionTitle>
+          <div style={{maxWidth:220}}>
+            <Select value={month} onChange={e=>setMonth(e.target.value)}>
+              <option value="all">All months</option>
+              {W.months.map(m=><option key={m} value={m}>{m}{m===thisMonth?" (current)":""}</option>)}
+            </Select>
+          </div>
+        </div>
+        <div style={s.kpiGrid}>
+          <KPI label={`Sick ${SICK_LIMIT}+ / month`} value={sick.length} color={C.red}/>
+          <KPI label={`Planned ${PLANNED_LIMIT}+ / month`} value={planned.length} color={C.amber}/>
+          <KPI label="Total flagged" value={sick.length+planned.length} color={C.purple}/>
+        </div>
+        <Card title={`🤒 Sick — ${SICK_LIMIT} or more in a month`} rows={sick} limit={SICK_LIMIT} color={C.red}
+              note={"Counts only records explicitly marked Sick (Day Off type = Sick, or Unplanned leave type exactly “Sick”). Free-text notes are not counted."}/>
+        <Card title={`📅 Planned days off — ${PLANNED_LIMIT} or more in a month`} rows={planned} limit={PLANNED_LIMIT} color={C.amber}/>
+      </div>
+    );
+  }
+
+  // Compact banner reused on the dashboards so breaches surface without opening the tab.
+  function WatchlistAlert({activeCampaign,user,isCEO}){
+    const month=todayStr().slice(0,7);
+    const W=useMemo(()=>buildWatchlist(activeCampaign,month),[activeCampaign,month]);
+    const tlMap=teamToTL();
+    const f=(arr)=>isCEO?arr:arr.filter(x=>tlMap[x.team]===user?.name||x.team===normTeam(user?.team));
+    const sick=f(W.sick), planned=f(W.planned);
+    if(!sick.length&&!planned.length) return null;
+    return (
+      <div style={{marginBottom:16}}>
+        {sick.length?<div style={s.alert(C.red)}>🚨 <strong>{sick.length}</strong> agent{sick.length===1?"":"s"} hit {SICK_LIMIT}+ sick days this month: {sick.slice(0,6).map(x=>x.agent).join(", ")}{sick.length>6?"…":""}</div>:null}
+        {planned.length?<div style={s.alert(C.amber)}>⚠️ <strong>{planned.length}</strong> agent{planned.length===1?"":"s"} at {PLANNED_LIMIT}+ planned days off this month: {planned.slice(0,6).map(x=>x.agent).join(", ")}{planned.length>6?"…":""}</div>:null}
+      </div>
+    );
+  }
 
 // ───────────── DAY-OFF AUTO-APPROVAL ENGINE ─────────────
 function evalDayOff(req, all) {
@@ -657,27 +1128,7 @@ function DayOffControl({user,activeCampaign,isCEO}){
       <div style={s.pgTitle}>📅 Day Off Control</div>
       <div style={s.pgSub}>Auto-approval engine — rules enforced automatically</div>
       <Tabs tabs={[{id:"list",label:"📋 Requests"},{id:"submit",label:"➕ New Request"},{id:"stats",label:"📊 Analytics"}]} active={tab} onChange={setTab}/>
-      {tab==="stats"&&(
-        <div>
-          <div style={s.kpiGrid}>
-            <KPI label="Total Requests" value={stats.total} color={C.blue}/>
-            <KPI label="Approved" value={stats.approved} color={C.green} sub={`${stats.approvalRate}% approval rate`}/>
-            <KPI label="Rejected" value={stats.rejected} color={C.red}/>
-            <KPI label="This Month" value={stats.thisMonth} color={C.purple} sub={mo}/>
-            <KPI label="Emergency" value={stats.emergency} color={C.amber}/>
-            <KPI label="Planned" value={stats.planned} color={C.blue}/>
-          </div>
-          <div style={s.g2}>
-            {isCEO?<div style={s.card()}><SectionTitle>By Team</SectionTitle>
-              <table style={s.tbl}><thead><tr><th style={s.th}>Team</th><th style={s.th}>Total</th><th style={s.th}>✅</th><th style={s.th}>❌</th></tr></thead>
-              <tbody>{stats.perTeam.map(t=><tr key={t.team}><td style={s.td}><strong style={{color:C.blue}}>{t.team}</strong></td><td style={s.td}>{t.total}</td><td style={{...s.td,color:C.green}}>{t.approved}</td><td style={{...s.td,color:C.red}}>{t.rejected}</td></tr>)}</tbody></table>
-            </div>:null}
-            <div style={s.card()}><SectionTitle>Top Agents by Requests</SectionTitle>
-              {stats.topAgents.length===0?<div style={{fontSize:12.5,color:C.sub}}>No data</div>:stats.topAgents.map(([n,c],i)=><div key={n} style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:`1px solid ${C.border}`}}><span style={{fontSize:12.5}}><span style={{color:C.sub,marginRight:8}}>#{i+1}</span>{n}</span><strong style={{color:C.blue}}>{c}</strong></div>)}
-            </div>
-          </div>
-        </div>
-      )}
+      {tab==="stats"&&<AnalyticsPanel rows={reqs} kind="dayoff"/>}
       {tab==="submit"&&(
         <div style={s.card()}>
           <SectionTitle>New Day Off Request</SectionTitle>
@@ -766,33 +1217,7 @@ function UnplannedTracker({user,activeCampaign,isCEO}){
       <div style={s.pgTitle}>⚠️ Unplanned Tracker</div>
       <div style={s.pgSub}>Flags agents with 2+ unplanned events per month</div>
       <Tabs tabs={[{id:"list",label:"📋 Events"},{id:"submit",label:"➕ Log Event"},{id:"stats",label:"📊 Analytics"}]} active={tab} onChange={setTab}/>
-      {tab==="stats"&&(
-        <div>
-          <div style={s.kpiGrid}>
-            <KPI label="Total Events" value={stats.total} color={C.blue}/>
-            <KPI label="🔴 High Risk Agents" value={stats.highRisk} color={C.red} sub="≥4 events/month"/>
-            <KPI label="🟠 Monitor" value={stats.monitor} color={C.amber} sub="2-3 events/month"/>
-            <KPI label="Unique Agents" value={[...new Set(scope.map(e=>e.agentName))].length} color={C.purple}/>
-          </div>
-          <div style={s.g2}>
-            <div style={s.card()}><SectionTitle>Top Repeat Offenders</SectionTitle>
-              {stats.topAgents.length===0?<div style={{fontSize:12.5,color:C.sub}}>No data</div>:stats.topAgents.map(([k,c],i)=>{ const parts=k.split("|"); return(<div key={k} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:`1px solid ${C.border}`}}><div><div style={{fontSize:12.5}}><span style={{color:C.sub,marginRight:8}}>#{i+1}</span>{parts[0]}</div><div style={{fontSize:11,color:C.blue}}>{parts[1]}</div></div><strong style={{color:c>=4?C.red:c>=2?C.amber:C.green}}>{c} events</strong></div>); })}
-            </div>
-            <div style={s.card()}><SectionTitle>Top Reasons</SectionTitle>
-              {stats.topTypes.length===0?<div style={{fontSize:12.5,color:C.sub}}>No data</div>:stats.topTypes.map(([type,cnt])=><div key={type} style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:`1px solid ${C.border}`}}><span style={{fontSize:12,color:C.sub,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{type}</span><strong style={{color:C.blue}}>{cnt}</strong></div>)}
-            </div>
-          </div>
-          {isCEO&&stats.perTeam.length>0?<div style={s.card()}><SectionTitle>By Team</SectionTitle>
-            <table style={s.tbl}><thead><tr><th style={s.th}>Team</th><th style={s.th}>Total Events</th><th style={s.th}>High Risk Agents</th></tr></thead>
-            <tbody>{stats.perTeam.map(t=><tr key={t.team}><td style={s.td}><strong style={{color:C.blue}}>{t.team}</strong></td><td style={s.td}>{t.total}</td><td style={s.td}><strong style={{color:t.highRisk>0?C.red:C.green}}>{t.highRisk}</strong></td></tr>)}</tbody></table>
-          </div>:null}
-          {Object.keys(stats.monthMap).length>0?<div style={s.card()}><SectionTitle>Monthly Trend</SectionTitle>
-            <div style={{display:"flex",gap:14,flexWrap:"wrap"}}>
-              {Object.entries(stats.monthMap).sort().map(([m,c])=><div key={m} style={{textAlign:"center",padding:"10px 14px",background:"#080c18",borderRadius:8,border:`1px solid ${C.border}`,minWidth:80}}><div style={{fontSize:18,fontWeight:700,color:C.blue}}>{c}</div><div style={{fontSize:11,color:C.sub,marginTop:2}}>{m}</div></div>)}
-            </div>
-          </div>:null}
-        </div>
-      )}
+      {tab==="stats"&&<AnalyticsPanel rows={events} kind="unplanned"/>}
       {tab==="submit"&&(
         <div style={s.card()}>
           <SectionTitle>Log Unplanned Event</SectionTitle>
@@ -804,7 +1229,14 @@ function UnplannedTracker({user,activeCampaign,isCEO}){
               <Field label="Date"><Input type="date" value={form.date} onChange={e=>setForm({...form,date:e.target.value})}/></Field>
             </div>
             <div>
-              <Field label="Event Type"><Input value={form.leaveType} onChange={e=>setForm({...form,leaveType:e.target.value})} placeholder="e.g. Internet Issue, Late Login, Power Outage..."/></Field>
+              <Field label="Event Type">
+                 <Select value={U_TYPES.indexOf(form.leaveType)>=0?form.leaveType:""} onChange={e=>setForm({...form,leaveType:e.target.value})}>
+                   <option value="">— pick a type —</option>
+                   {U_TYPES.map(t=><option key={t} value={t}>{t}</option>)}
+                 </Select>
+                 <div style={{height:6}}/>
+                 <Input value={form.leaveType} onChange={e=>setForm({...form,leaveType:e.target.value})} placeholder="…or type a custom reason"/>
+               </Field>
               <Field label="Notes"><textarea style={{...s.inp,height:80,resize:"vertical"}} value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})} placeholder="Context..."/></Field>
             </div>
           </div>
@@ -864,38 +1296,7 @@ function AttritionLog({user,isCEO}){
       <div style={s.pgTitle}>📉 Attrition Log</div>
       <div style={s.pgSub}>Global — tracks departures across all campaigns</div>
       <Tabs tabs={[{id:"list",label:"📋 Log"},{id:"submit",label:"➕ Add Entry"},{id:"stats",label:"📊 Analytics"}]} active={tab} onChange={setTab}/>
-      {tab==="stats"&&(
-        <div>
-          <div style={s.kpiGrid}>
-            <KPI label="Total Attrition" value={stats.total} color={C.red}/>
-            <KPI label="Departed" value={stats.departed} color={C.red} sub={`${((stats.departed/Math.max(stats.total,1))*100).toFixed(0)}% of logged`}/>
-            <KPI label="On-the-Spot" value={stats.onSpot} color={C.amber} sub="Immediate drops"/>
-            <KPI label="2-Week Notice" value={stats.twoWk} color={C.blue}/>
-            <KPI label="Terminations" value={stats.terms} color={C.purple}/>
-            <KPI label="Replacement Rate" value={`${stats.replRate}%`} color={C.green}/>
-          </div>
-          <div style={s.g2}>
-            <div style={s.card()}><SectionTitle>Top Departure Reasons</SectionTitle>
-              {stats.topReasons.length===0?<div style={{fontSize:12.5,color:C.sub}}>No data</div>:stats.topReasons.map(([r,c])=><div key={r} style={{display:"flex",justifyContent:"space-between",padding:"7px 0",borderBottom:`1px solid ${C.border}`}}><span style={{fontSize:12,color:C.sub}}>{r}</span><strong style={{color:C.red}}>{c}</strong></div>)}
-            </div>
-            <div style={s.card()}><SectionTitle>By Campaign</SectionTitle>
-              <table style={s.tbl}><thead><tr><th style={s.th}>Campaign</th><th style={s.th}>Total</th><th style={s.th}>Departed</th></tr></thead>
-              <tbody>{stats.perCampaign.map(c=><tr key={c.name}><td style={s.td}><strong style={{color:C.blue}}>{c.name}</strong></td><td style={s.td}>{c.total}</td><td style={{...s.td,color:C.red,fontWeight:600}}>{c.departed}</td></tr>)}</tbody></table>
-            </div>
-          </div>
-          {Object.keys(stats.monthMap).length>0?<div style={s.card()}><SectionTitle>Monthly Attrition Trend</SectionTitle>
-            <div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"flex-end"}}>
-              {Object.entries(stats.monthMap).sort().map(([m,c])=>{ const mx=Math.max(...Object.values(stats.monthMap)); return(
-                <div key={m} style={{textAlign:"center",minWidth:68}}>
-                  <div style={{height:70,display:"flex",alignItems:"flex-end",justifyContent:"center",marginBottom:5}}><div style={{width:36,background:C.red,borderRadius:"3px 3px 0 0",height:`${(c/mx)*70}px`,minHeight:3}}></div></div>
-                  <div style={{fontSize:14,fontWeight:700,color:C.red}}>{c}</div>
-                  <div style={{fontSize:10,color:C.sub}}>{m}</div>
-                </div>
-              ); })}
-            </div>
-          </div>:null}
-        </div>
-      )}
+      {tab==="stats"&&<AnalyticsPanel rows={log} kind="attrition"/>}
       {tab==="submit"&&(
         <div style={s.card()}>
           <SectionTitle>Log Departure</SectionTitle>
@@ -1402,6 +1803,9 @@ function App(){
     {id:"unplanned",icon:"⚠️",label:"Unplanned Tracker"},
     {id:"attrition",icon:"📉",label:"Attrition Log"},
     {id:"hr",icon:"🗂",label:"HR Records"},
+    {section:"Insights"},
+    {id:"compliance",icon:"🛡",label:"TL Compliance"},
+    {id:"watchlist",icon:"🚨",label:"Agent Watchlist"},
     {section:"Admin"},
     {id:"config",icon:"⚙️",label:"Configuration"},
     {id:"users",icon:"👤",label:"User Management"},
@@ -1414,6 +1818,7 @@ function App(){
     {id:"attrition",icon:"📉",label:"Attrition Log"},
     {id:"hr",icon:"🗂",label:"HR Records"},
     {id:"reports",icon:"📋",label:"Reports"},
+    {id:"watchlist",icon:"🚨",label:"My Watchlist"},
   ];
   const nav=isCEO?ceoNav:tlNav;
   if(!booted) return <Splash/>;
@@ -1450,6 +1855,7 @@ function App(){
         </div>
       </div>
       <div style={s.main}>
+        <WatchlistAlert activeCampaign={activeCampaign} user={user} isCEO={isCEO}/>
         {page==="dashboard"&&(isCEO?<CEODashboard key={ck} activeCampaign={activeCampaign}/>:<TLDashboard key={ck} user={user} activeCampaign={activeCampaign}/>)}
         {page==="hourly"&&<HourlyInput key={ck} user={user} activeCampaign={activeCampaign}/>}
         {page==="dayoff"&&<DayOffControl key={ck} user={user} activeCampaign={activeCampaign} isCEO={isCEO}/>}
@@ -1458,6 +1864,8 @@ function App(){
         {page==="hr"&&<HRRecords key={ck} user={user} activeCampaign={activeCampaign} isCEO={isCEO}/>}
         {page==="reports"&&<Reports key={ck} user={user} activeCampaign={activeCampaign} isCEO={isCEO}/>}
         {page==="config"&&(isCEO?<ConfigPage key={ck} activeCampaign={activeCampaign} setActiveCampaign={setActiveCampaign}/>:<div style={s.alert(C.red)}>🚫 Access denied. CEO only.</div>)}
+        {page==="compliance"&&<ComplianceView key={ck} activeCampaign={activeCampaign} user={user} isCEO={isCEO}/>}
+        {page==="watchlist"&&<WatchlistView key={ck} activeCampaign={activeCampaign} user={user} isCEO={isCEO}/>}
         {page==="users"&&(isCEO?<UserManagement key={"u"+dataV}/>:<div style={s.alert(C.red)}>🚫 Access denied. CEO only.</div>)}
       </div>
     </div>
