@@ -763,86 +763,210 @@ const SectionTitle = ({children})=><div style={s.ctitle}>{children}</div>;
 
   // ───────── Feature 3: agent watchlist (3+ sick, 5+ planned in a month) ─────────
   const SICK_LIMIT=3, PLANNED_LIMIT=5;
-  function buildWatchlist(cid, monthFilter){
+
+  // Full month picture per agent. Everything is counted as DISTINCT DAYS —
+  // an agent cannot be off twice on the same date, and TLs sometimes log a day
+  // twice. (The Analytics tabs count raw records, so totals can differ slightly.)
+  function buildWatchlist(cid, monthFilter, teamFilter){
     const dayoff=LS.get(cKey(cid,"dayoff"),[])||[];
     const unpl  =LS.get(cKey(cid,"unplanned"),[])||[];
-    const all=dayoff.concat(unpl);
-    const sick={}, planned={};
-    all.forEach(r=>{
-      const a=normAgent(r.agentName); const m=ym(recDate(r)); if(!a||!m) return;
+    const months=new Set();
+    const agents={};   // agent||month -> buckets
+    const touch=(r,bucket)=>{
+      const a=normAgent(r.agentName), m=ym(recDate(r)), d=recDate(r);
+      if(!a||!m) return;
+      months.add(m);
       if(monthFilter&&monthFilter!=="all"&&m!==monthFilter) return;
-      if(isSickRecord(r)){ const k=a+"||"+m; (sick[k]=sick[k]||{agent:a,month:m,team:normTeam(r.team),items:[]}).items.push(r); }
-      if(isPlannedRecord(r)){ const k=a+"||"+m; (planned[k]=planned[k]||{agent:a,month:m,team:normTeam(r.team),items:[]}).items.push(r); }
+      const team=normTeam(r.team);
+      if(teamFilter&&teamFilter!=="all"&&team!==teamFilter) return;
+      const k=a+"||"+m;
+      const g=agents[k]||(agents[k]={agent:a,month:m,team,teams:new Set(),
+        planned:new Set(),emergency:new Set(),sick:new Set(),unplanned:new Set(),items:{planned:[],sick:[]}});
+      g.teams.add(team);
+      if(d) g[bucket].add(d);
+      if(bucket==="sick"||bucket==="planned") g.items[bucket].push(r);
+    };
+    dayoff.forEach(r=>{
+      const t=String(r.type||"").toLowerCase();
+      if(t==="planned"||t==="part time") touch(r,"planned");
+      else if(t==="emergency") touch(r,"emergency");
+      else if(t==="sick") touch(r,"sick");
     });
-    const pick=(obj,limit)=>Object.values(obj).map(v=>{
-        const days=[...new Set(v.items.map(r=>recDate(r)).filter(Boolean))].sort();
-        return {...v,count:days.length,days,records:v.items.length,dupes:v.items.length-days.length};
-      }).filter(v=>v.count>=limit).sort((a,b)=>b.month.localeCompare(a.month)||b.count-a.count);
-    const months=[...new Set(all.map(r=>ym(recDate(r))).filter(Boolean))].sort().reverse();
-    return {sick:pick(sick,SICK_LIMIT), planned:pick(planned,PLANNED_LIMIT), months};
+    unpl.forEach(r=>{
+      const cat=leaveCategory(r.leaveType);
+      if(cat==="Sick") touch(r,"sick"); else touch(r,"unplanned");
+    });
+
+    const rows=Object.values(agents).map(g=>({
+      agent:g.agent, month:g.month, team:[...g.teams].join(", "),
+      planned:g.planned.size, emergency:g.emergency.size, sick:g.sick.size, unplanned:g.unplanned.size,
+      total:g.planned.size+g.emergency.size+g.sick.size+g.unplanned.size,
+      sickDates:[...g.sick].sort(), plannedDates:[...g.planned].sort(),
+      sickRecords:g.items.sick.length, plannedRecords:g.items.planned.length,
+      overSick:g.sick.size>=SICK_LIMIT, overPlanned:g.planned.size>=PLANNED_LIMIT,
+    })).sort((a,b)=>b.total-a.total||a.agent.localeCompare(b.agent));
+
+    const byTeam={};
+    rows.forEach(r=>{
+      const t=byTeam[r.team]||(byTeam[r.team]={team:r.team,agents:0,planned:0,emergency:0,sick:0,unplanned:0,flagged:0});
+      t.agents++; t.planned+=r.planned; t.emergency+=r.emergency; t.sick+=r.sick; t.unplanned+=r.unplanned;
+      if(r.overSick||r.overPlanned) t.flagged++;
+    });
+
+    return {
+      rows,
+      teams:Object.values(byTeam).sort((a,b)=>(b.planned+b.emergency+b.sick+b.unplanned)-(a.planned+a.emergency+a.sick+a.unplanned)),
+      sick:rows.filter(r=>r.overSick).map(r=>({...r,count:r.sick,days:r.sickDates,dupes:r.sickRecords-r.sick})),
+      planned:rows.filter(r=>r.overPlanned).map(r=>({...r,count:r.planned,days:r.plannedDates,dupes:r.plannedRecords-r.planned})),
+      months:[...months].sort().reverse(),
+      totals:rows.reduce((a,r)=>({planned:a.planned+r.planned,emergency:a.emergency+r.emergency,
+        sick:a.sick+r.sick,unplanned:a.unplanned+r.unplanned}),{planned:0,emergency:0,sick:0,unplanned:0}),
+    };
   }
 
   function WatchlistView({activeCampaign,user,isCEO}){
-  useLive();
+    useLive();
     const thisMonth=todayStr().slice(0,7);
     const [month,setMonth]=useState(thisMonth);
-    const W=useMemo(()=>buildWatchlist(activeCampaign,month),[activeCampaign,month]);
+    const [team,setTeam]=useState("all");
+    const myTeams=useMemo(()=>teamsForUser(activeCampaign,user),[activeCampaign,user,month]);
+    const W=useMemo(()=>buildWatchlist(activeCampaign,month,"all"),[activeCampaign,month]);
     const tlMap=teamToTL();
-    const myTeams=useMemo(()=>teamsForUser(activeCampaign,user),[activeCampaign,user,W]);
-    const mineOnly=(arr)=>isCEO?arr:arr.filter(x=>myTeams.has(normTeam(x.team)));
-    const sick=mineOnly(W.sick), planned=mineOnly(W.planned);
-    const Card=({title,rows,limit,color,note})=>(
-      <div style={s.card()}>
-        <SectionTitle>{title} — {rows.length} agent{rows.length===1?"":"s"}</SectionTitle>
-        {rows.length===0?<div style={{fontSize:12.5,color:C.sub}}>None. ✅</div>:(
-          <table style={s.tbl}>
-            <thead><tr><th style={s.th}>Agent</th><th style={s.th}>Team</th><th style={s.th}>TL</th><th style={s.th}>Month</th><th style={s.th}>Count</th><th style={s.th}>Dates</th></tr></thead>
-            <tbody>{rows.map(r=>(
-              <tr key={r.agent+r.month}>
-                <td style={s.td}><strong>{r.agent}</strong></td>
-                <td style={s.td}>{r.team}</td>
-                <td style={{...s.td,color:C.sub}}>{tlLabel(tlMap,r.team)}</td>
-                <td style={s.td}>{r.month}</td>
-                <td style={{...s.td,color,fontWeight:700}}>{r.count} <span style={{color:C.sub,fontWeight:400}}>/ {limit}</span></td>
-                <td style={{...s.td,color:C.sub,fontSize:11.5}}>{(r.days||[]).join(", ")}
-                  {r.dupes>0?<span style={{color:C.amber}}> · ⚠ {r.dupes} duplicate entr{r.dupes===1?"y":"ies"} ignored</span>:null}</td>
-              </tr>))}
-            </tbody>
-          </table>)}
-        {note?<div style={{fontSize:11,color:C.sub,marginTop:8}}>{note}</div>:null}
-      </div>
-    );
+    const scope=(arr)=>{
+      let a=isCEO?arr:arr.filter(x=>String(x.team).split(", ").some(t=>myTeams.has(t)));
+      if(team!=="all") a=a.filter(x=>String(x.team).split(", ").indexOf(team)>=0);
+      return a;
+    };
+    const rows=scope(W.rows), sick=scope(W.sick), planned=scope(W.planned);
+    const teamOpts=[...new Set(W.rows.map(r=>r.team))].filter(t=>isCEO||myTeams.has(t)).sort();
+    const tot=rows.reduce((a,r)=>({planned:a.planned+r.planned,emergency:a.emergency+r.emergency,
+      sick:a.sick+r.sick,unplanned:a.unplanned+r.unplanned}),{planned:0,emergency:0,sick:0,unplanned:0});
+    const teamRows=W.teams.filter(t=>isCEO?true:myTeams.has(t.team)).filter(t=>team==="all"||t.team===team);
+
     return (
       <div>
-        <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>🚨 Agent Watchlist</div>
-        <div style={{fontSize:12.5,color:C.sub,marginBottom:18}}>Updates automatically as records are entered. {isCEO?"All teams.":"Your team only."}</div>
+        <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>🚨 {isCEO?"Agent Watchlist":"My Watchlist"}</div>
+        <div style={{fontSize:12.5,color:C.sub,marginBottom:18}}>
+          Everything your {isCEO?"teams have":"team has"} logged this month — days off, emergencies, sick days and
+          unplanned events — plus anyone over the limits. Counted as distinct days. Updates live.
+        </div>
+
         {sick.length>0?<div style={s.alert(C.red)}>
-          🚨 <strong>{sick.length}</strong> agent{sick.length===1?"":"s"} reached <strong>{SICK_LIMIT}+ sick days</strong> in a month — company policy review required.
+          🚨 <strong>{sick.length}</strong> agent{sick.length===1?"":"s"} at <strong>{SICK_LIMIT}+ sick days</strong> — policy review required.
         </div>:null}
         {planned.length>0?<div style={s.alert(C.amber)}>
-          ⚠️ <strong>{planned.length}</strong> agent{planned.length===1?"":"s"} at <strong>{PLANNED_LIMIT}+ planned days off</strong> in a month.
+          ⚠️ <strong>{planned.length}</strong> agent{planned.length===1?"":"s"} at <strong>{PLANNED_LIMIT}+ planned days off</strong>.
         </div>:null}
-        {sick.length===0&&planned.length===0?<div style={s.alert(C.green)}>✅ No agents over threshold for {month==="all"?"any month":month}.</div>:null}
+
         <div style={s.card()}>
-          <SectionTitle>Month</SectionTitle>
-          <div style={{maxWidth:220}}>
-            <Select value={month} onChange={e=>setMonth(e.target.value)}>
-              <option value="all">All months</option>
-              {W.months.map(m=><option key={m} value={m}>{m}{m===thisMonth?" (current)":""}</option>)}
-            </Select>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
+            <Field label="Month">
+              <Select value={month} onChange={e=>setMonth(e.target.value)}>
+                <option value="all">All months</option>
+                {W.months.map(m=><option key={m} value={m}>{m}{m===thisMonth?" (current)":""}</option>)}
+              </Select>
+            </Field>
+            <Field label="Team">
+              <Select value={team} onChange={e=>setTeam(e.target.value)}>
+                <option value="all">{isCEO?"All teams":"All my teams"}</option>
+                {teamOpts.map(t=><option key={t} value={t}>{t}</option>)}
+              </Select>
+            </Field>
+          </div>
+          <div style={{fontSize:11.5,color:C.sub}}>
+            {rows.length} agent{rows.length===1?"":"s"} with activity{isCEO?"":" in "+([...myTeams].join(", ")||"your team")}
+            {" · "}<span style={{color:C.green,cursor:"pointer"}} onClick={()=>A_csv(rows,`watchlist_${month}.csv`)}>⬇ export CSV</span>
           </div>
         </div>
+
         <div style={s.kpiGrid}>
-          <KPI label={`Sick ${SICK_LIMIT}+ / month`} value={sick.length} color={C.red}/>
-          <KPI label={`Planned ${PLANNED_LIMIT}+ / month`} value={planned.length} color={C.amber}/>
-          <KPI label="Total flagged" value={sick.length+planned.length} color={C.purple}/>
+          <KPI label="Planned days off" value={tot.planned} color={C.blue}/>
+          <KPI label="Emergency" value={tot.emergency} color={C.amber}/>
+          <KPI label="Sick days" value={tot.sick} color={C.red}/>
+          <KPI label="Unplanned events" value={tot.unplanned} color={C.purple}/>
+          <KPI label="Agents with activity" value={rows.length} color={C.green}/>
+          <KPI label="Over limit" value={sick.length+planned.length} color={C.red} sub={`${SICK_LIMIT}+ sick / ${PLANNED_LIMIT}+ planned`}/>
         </div>
-        <Card title={`🤒 Sick — ${SICK_LIMIT} or more in a month`} rows={sick} limit={SICK_LIMIT} color={C.red}
-              note={"Counts only records explicitly marked Sick (Day Off type = Sick, or Unplanned leave type exactly “Sick”). Free-text notes are not counted."}/>
-        <Card title={`📅 Planned days off — ${PLANNED_LIMIT} or more in a month`} rows={planned} limit={PLANNED_LIMIT} color={C.amber}/>
+
+        {teamRows.length>1?<div style={s.card()}>
+          <SectionTitle>By Team</SectionTitle>
+          <table style={s.tbl}>
+            <thead><tr><th style={s.th}>Team</th><th style={s.th}>TL</th><th style={s.th}>Agents</th>
+              <th style={s.th}>Planned</th><th style={s.th}>Emergency</th><th style={s.th}>Sick</th>
+              <th style={s.th}>Unplanned</th><th style={s.th}>Flagged</th></tr></thead>
+            <tbody>{teamRows.map(t=>(
+              <tr key={t.team}>
+                <td style={s.td}><strong style={{color:C.blue}}>{t.team}</strong></td>
+                <td style={{...s.td,color:C.sub}}>{tlLabel(tlMap,t.team)}</td>
+                <td style={s.td}>{t.agents}</td>
+                <td style={s.td}>{t.planned}</td>
+                <td style={{...s.td,color:t.emergency?C.amber:C.sub}}>{t.emergency}</td>
+                <td style={{...s.td,color:t.sick?C.red:C.sub}}>{t.sick}</td>
+                <td style={s.td}>{t.unplanned}</td>
+                <td style={{...s.td,color:t.flagged?C.red:C.sub,fontWeight:t.flagged?700:400}}>{t.flagged||"—"}</td>
+              </tr>))}
+            </tbody>
+          </table>
+        </div>:null}
+
+        <div style={s.card()}>
+          <SectionTitle>Every agent — {month==="all"?"all months":month} ({rows.length})</SectionTitle>
+          {rows.length===0?<div style={{fontSize:12.5,color:C.sub}}>No activity logged for this period.</div>:(
+          <div style={{overflowX:"auto",maxHeight:520,overflowY:"auto"}}>
+            <table style={s.tbl}>
+              <thead><tr><th style={s.th}>Agent</th><th style={s.th}>Team</th><th style={s.th}>Month</th>
+                <th style={s.th}>Planned</th><th style={s.th}>Emergency</th><th style={s.th}>Sick</th>
+                <th style={s.th}>Unplanned</th><th style={s.th}>Total</th><th style={s.th}>Status</th></tr></thead>
+              <tbody>{rows.map(r=>(
+                <tr key={r.agent+r.month}>
+                  <td style={s.td}><strong>{r.agent}</strong></td>
+                  <td style={{...s.td,color:C.sub}}>{r.team}</td>
+                  <td style={{...s.td,color:C.sub}}>{r.month}</td>
+                  <td style={{...s.td,color:r.overPlanned?C.amber:C.text,fontWeight:r.overPlanned?700:400}}>{r.planned||"—"}</td>
+                  <td style={s.td}>{r.emergency||"—"}</td>
+                  <td style={{...s.td,color:r.overSick?C.red:C.text,fontWeight:r.overSick?700:400}}>{r.sick||"—"}</td>
+                  <td style={s.td}>{r.unplanned||"—"}</td>
+                  <td style={{...s.td,fontWeight:700}}>{r.total}</td>
+                  <td style={s.td}>{r.overSick?<Badge text={"🚨 "+r.sick+" sick"}/>:r.overPlanned?<Badge text={"⚠ "+r.planned+" planned"}/>:<span style={{color:C.sub,fontSize:11.5}}>ok</span>}</td>
+                </tr>))}
+              </tbody>
+            </table>
+          </div>)}
+          <div style={{fontSize:11,color:C.sub,marginTop:8}}>
+            Distinct days, so a date logged twice counts once. Sick includes Day Off type “Sick” and
+            Unplanned events categorised as sick. Planned includes Part Time.
+          </div>
+        </div>
+
+        {(sick.length>0||planned.length>0)?<div style={s.card()}>
+          <SectionTitle>Over the limit — detail</SectionTitle>
+          <table style={s.tbl}>
+            <thead><tr><th style={s.th}>Agent</th><th style={s.th}>Team</th><th style={s.th}>TL</th>
+              <th style={s.th}>Type</th><th style={s.th}>Count</th><th style={s.th}>Dates</th></tr></thead>
+            <tbody>
+              {sick.map(r=><tr key={"s"+r.agent+r.month}>
+                <td style={s.td}><strong>{r.agent}</strong></td><td style={s.td}>{r.team}</td>
+                <td style={{...s.td,color:C.sub}}>{tlLabel(tlMap,String(r.team).split(", ")[0])}</td>
+                <td style={{...s.td,color:C.red}}>Sick</td>
+                <td style={{...s.td,color:C.red,fontWeight:700}}>{r.count} / {SICK_LIMIT}</td>
+                <td style={{...s.td,color:C.sub,fontSize:11.5}}>{r.days.join(", ")}
+                  {r.dupes>0?<span style={{color:C.amber}}> · ⚠ {r.dupes} duplicate ignored</span>:null}</td>
+              </tr>)}
+              {planned.map(r=><tr key={"p"+r.agent+r.month}>
+                <td style={s.td}><strong>{r.agent}</strong></td><td style={s.td}>{r.team}</td>
+                <td style={{...s.td,color:C.sub}}>{tlLabel(tlMap,String(r.team).split(", ")[0])}</td>
+                <td style={{...s.td,color:C.amber}}>Planned</td>
+                <td style={{...s.td,color:C.amber,fontWeight:700}}>{r.count} / {PLANNED_LIMIT}</td>
+                <td style={{...s.td,color:C.sub,fontSize:11.5}}>{r.days.join(", ")}
+                  {r.dupes>0?<span style={{color:C.amber}}> · ⚠ {r.dupes} duplicate ignored</span>:null}</td>
+              </tr>)}
+            </tbody>
+          </table>
+        </div>:null}
       </div>
     );
   }
+
 
   // Compact banner reused on the dashboards so breaches surface without opening the tab.
   function WatchlistAlert({activeCampaign,user,isCEO}){
