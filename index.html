@@ -139,6 +139,29 @@ const LS = {
 };
 const cKey = (cid,suffix) => `ko_${suffix}_${cid}`;
 
+const syncBase = {};   // last server-confirmed value per key (merge ancestor)
+  // Three-way merge for list keys, so two people editing the same tab never
+  // overwrite each other. syncBase[k] is the last value the server confirmed —
+  // it is the common ancestor that tells a deliberate delete apart from a
+  // record we simply never saw.
+  function kcMergeArrays(base, theirs, ours){
+    const idf = r => (r && r.id!=null) ? String(r.id) : null;
+    const baseIds = new Set((base||[]).map(idf).filter(Boolean));
+    const ourMap = new Map(); const ourNoId = [];
+    (ours||[]).forEach(r=>{ const k=idf(r); if(k) ourMap.set(k,r); else ourNoId.push(r); });
+    const out=[]; const placed=new Set();
+    (theirs||[]).forEach(r=>{
+      const k=idf(r);
+      if(!k){ out.push(r); return; }
+      if(ourMap.has(k)){ out.push(ourMap.get(k)); placed.add(k); return; } // our edit wins
+      if(baseIds.has(k)) return;            // in the ancestor, gone locally => we deleted it
+      out.push(r);                          // someone else added it since our last sync => keep
+    });
+    ourMap.forEach((r,k)=>{ if(!placed.has(k)) out.push(r); });  // our brand-new records
+    ourNoId.forEach(r=>out.push(r));
+    return out;
+  }
+
 function queuePush(k){ clearTimeout(pendingPush.get(k)); pendingPush.set(k, setTimeout(()=>doPush(k), 700)); }
 async function doPush(k){
   pendingPush.delete(k);
@@ -152,8 +175,23 @@ async function doPush(k){
         if(remote && typeof remote==="object" && !Array.isArray(remote) && !remote.__del){ val = {...remote, ...cache[k]}; cache[k]=val; try{ localStorage.setItem(k,JSON.stringify(val)); }catch(e){} }
       }
     }
+    // list data: three-way merge so a stale tab can never drop someone else's record
+    if(Array.isArray(val)){
+      const rr = await fetch(`${SB_TBL}?key=eq.${encodeURIComponent(k)}&select=value`, { headers: SB_HDRS });
+      if(rr.ok){ const rows2 = await rr.json(); const remote2 = rows2[0] && rows2[0].value;
+        if(Array.isArray(remote2)){
+          const merged = kcMergeArrays(syncBase[k], remote2, cache[k]);
+          if(JSON.stringify(merged)!==JSON.stringify(cache[k])){
+            val = merged; cache[k]=merged;
+            try{ localStorage.setItem(k,JSON.stringify(merged)); }catch(e){}
+            emitRemote();
+          } else { val = merged; }
+        }
+      }
+    }
     const res = await fetch(SB_TBL, { method:"POST", headers:{...SB_HDRS,"Content-Type":"application/json",Prefer:"resolution=merge-duplicates"}, body: JSON.stringify([{ key:k, value:val }]) });
     if(!res.ok) throw new Error("push "+res.status);
+    syncBase[k] = val;
     if(SYNC.status!=="online"){ SYNC.status="online"; emitStatus(); }
   }catch(e){
     SYNC.status="offline"; emitStatus();
@@ -184,6 +222,7 @@ async function pullAll(initial){
         if(key in cache){ delete cache[key]; try{ localStorage.removeItem(key); }catch(e){} changed = true; }
         return;
       }
+      syncBase[key]=value;
       if(JSON.stringify(cache[key]) !== JSON.stringify(value)){
         cache[key]=value; try{ localStorage.setItem(key,JSON.stringify(value)); }catch(e){}
         changed = true;
