@@ -303,6 +303,26 @@ const Badge = ({text=""})=>{
   if(t.includes("⚠")||t.includes("🟠")||t.includes("Monitor")||t.includes("TIGHT")||t.includes("Notice")) return <span style={s.badge(C.amber,C.amber+"18")}>{t}</span>;
   return <span style={s.badge(C.sub,"#1a2035")}>{t}</span>;
 };
+// Keep data fresh on remote changes WITHOUT remounting the page.
+// The old key={activeCampaign+":"+dataV} trick rebuilt the component on every
+// remote save, throwing the user back to the first sub-tab and wiping filters,
+// search boxes and date pickers. These two hooks replace that.
+function useLive(){
+  const [,bump]=useState(0);
+  useEffect(()=>{ const f=()=>bump(v=>v+1);
+    window.addEventListener("ko-remote",f);
+    return ()=>window.removeEventListener("ko-remote",f); },[]);
+}
+function useLiveState(key, def){
+  const [val,setVal]=useState(()=>LS.get(key,def));
+  useEffect(()=>{
+    setVal(LS.get(key,def));
+    const f=()=>setVal(LS.get(key,def));
+    window.addEventListener("ko-remote",f);
+    return ()=>window.removeEventListener("ko-remote",f);
+  },[key]);
+  return [val,setVal];
+}
 const KPI = ({label,value,sub,color=C.blue})=>(
   <div style={s.kpi(color)}>
     <div style={s.kpiVal}>{value}</div>
@@ -617,6 +637,7 @@ const SectionTitle = ({children})=><div style={s.ctitle}>{children}</div>;
   }
 
   function ComplianceView({activeCampaign,user,isCEO}){
+  useLive();
     const [f,setF]=useState(()=>({range:"30d",from:"",to:""}));
     const R=A_resolve(f);
     const D=useMemo(()=>buildCompliance(activeCampaign,R.from,R.to),[activeCampaign,R.from,R.to]);
@@ -741,6 +762,7 @@ const SectionTitle = ({children})=><div style={s.ctitle}>{children}</div>;
   }
 
   function WatchlistView({activeCampaign,user,isCEO}){
+  useLive();
     const thisMonth=todayStr().slice(0,7);
     const [month,setMonth]=useState(thisMonth);
     const W=useMemo(()=>buildWatchlist(activeCampaign,month),[activeCampaign,month]);
@@ -863,9 +885,10 @@ function Login({onLogin}){
 
 // ───────────── CONFIG (CEO) ─────────────
 function ConfigPage({activeCampaign,setActiveCampaign}){
+  useLive();
   const cfgKey=cKey(activeCampaign,"config");
   const [cfg,setCfg]=useState(()=>LS.get(cfgKey,DEFAULT_CONFIG()));
-  const [campaigns,setCampaigns]=useState(()=>LS.get("ko_campaigns",DEFAULT_CAMPAIGNS));
+  const [campaigns,setCampaigns]=useLiveState("ko_campaigns",DEFAULT_CAMPAIGNS);
   const [newCampaign,setNewCampaign]=useState("");
   const [tab,setTab]=useState("global");
   const [saved,setSaved]=useState(false);
@@ -978,7 +1001,7 @@ function ConfigPage({activeCampaign,setActiveCampaign}){
 
 // ───────────── USER MANAGEMENT (CEO) ─────────────
 function UserManagement(){
-  const [users,setUsers]=useState(()=>LS.get("ko_users",DEFAULT_USERS));
+  const [users,setUsers]=useLiveState("ko_users",DEFAULT_USERS);
   const campaigns=LS.get("ko_campaigns",DEFAULT_CAMPAIGNS);
   const [tab,setTab]=useState("list");
   const blankForm={name:"",role:"tl",password:"",campaignId:campaigns[0]?.id||"ssdi",team:"",active:true};
@@ -1074,6 +1097,7 @@ function UserManagement(){
 
 // ───────────── HOURLY INPUT ─────────────
 function HourlyInput({user,activeCampaign}){
+  useLive();
   const cfg=LS.get(cKey(activeCampaign,"config"),DEFAULT_CONFIG());
   const isTL=user.role==="tl"&&!!user.team;
   const [selTeam,setSelTeam]=useState(isTL?user.team:(cfg.teams[0]?.name||""));
@@ -1158,7 +1182,7 @@ function DayOffControl({user,activeCampaign,isCEO}){
   const dKey=cKey(activeCampaign,"dayoff");
   const cfg=LS.get(cKey(activeCampaign,"config"),DEFAULT_CONFIG());
   const teams=[...new Set([...cfg.teams.map(t=>t.name),...(user.team?[user.team]:[])])];
-  const [reqs,setReqs]=useState(()=>LS.get(dKey,[]));
+  const [reqs,setReqs]=useLiveState(dKey,[]);
   const [form,setForm]=useState({requestDate:todayStr(),dayoffDate:"",agentName:"",team:user.team||teams[0]||"",type:"Planned",notes:""});
   const [tab,setTab]=useState("list");
   const [msg,setMsg]=useState(null);
@@ -1248,7 +1272,7 @@ function UnplannedTracker({user,activeCampaign,isCEO}){
   const uKey=cKey(activeCampaign,"unplanned");
   const cfg=LS.get(cKey(activeCampaign,"config"),DEFAULT_CONFIG());
   const teams=[...new Set([...cfg.teams.map(t=>t.name),...(user.team?[user.team]:[])])];
-  const [events,setEvents]=useState(()=>LS.get(uKey,[]));
+  const [events,setEvents]=useLiveState(uKey,[]);
   const [form,setForm]=useState({agentName:"",team:user.team||teams[0]||"",date:todayStr(),leaveType:"",notes:""});
   const [tab,setTab]=useState("list");
   const [msg,setMsg]=useState("");
@@ -1330,7 +1354,7 @@ function UnplannedTracker({user,activeCampaign,isCEO}){
 // ───────────── ATTRITION LOG (GLOBAL) ─────────────
 function AttritionLog({user,isCEO}){
   const campaigns=LS.get("ko_campaigns",DEFAULT_CAMPAIGNS);
-  const [log,setLog]=useState(()=>LS.get("ko_attrition",[]));
+  const [log,setLog]=useLiveState("ko_attrition",[]);
   const blank={dateLogged:todayStr(),agentName:"",team:"",campaignId:user.campaignId||campaigns[0]?.id||"ssdi",departureType:"2-Week Notice",noticeDate:"",lastWorkingDay:"",reason:"",replacementHired:"No",notes:""};
   const [form,setForm]=useState(blank);
   const [tab,setTab]=useState("list");
@@ -1438,7 +1462,7 @@ function HRRecords({user,activeCampaign,isCEO}){
   const rKey=cKey(activeCampaign,"hr");
   const cfg=LS.get(cKey(activeCampaign,"config"),DEFAULT_CONFIG());
   const teams=[...new Set([...cfg.teams.map(t=>t.name),...(user.team?[user.team]:[])])];
-  const [records,setRecords]=useState(()=>LS.get(rKey,[]));
+  const [records,setRecords]=useLiveState(rKey,[]);
   const blank={date:todayStr(),employee:"",team:user.team||teams[0]||"",type:"Verbal Warning",severity:"1st Time",reason:"",deduction:"",notes:""};
   const [form,setForm]=useState(blank);
   const [tab,setTab]=useState("list");
@@ -1506,6 +1530,7 @@ function HRRecords({user,activeCampaign,isCEO}){
 
 // ───────────── REPORTS ─────────────
 function Reports({user,activeCampaign,isCEO}){
+  useLive();
   const cfg=LS.get(cKey(activeCampaign,"config"),DEFAULT_CONFIG());
   const teams=cfg.teams.map(t=>t.name);
   const campaigns=LS.get("ko_campaigns",DEFAULT_CAMPAIGNS);
@@ -1696,6 +1721,7 @@ function Reports({user,activeCampaign,isCEO}){
 
 // ───────────── CEO DASHBOARD ─────────────
 function CEODashboard({activeCampaign}){
+  useLive();
   const cfg=LS.get(cKey(activeCampaign,"config"),DEFAULT_CONFIG());
   const teams=cfg.teams;
   const date=todayStr();
@@ -1783,6 +1809,7 @@ function CEODashboard({activeCampaign}){
 
 // ───────────── TL DASHBOARD ─────────────
 function TLDashboard({user,activeCampaign}){
+  useLive();
   const cfg=LS.get(cKey(activeCampaign,"config"),DEFAULT_CONFIG());
   const teamCfg=cfg.teams.find(t=>t.name===user.team)||{required:0};
   const date=todayStr();
@@ -1887,7 +1914,7 @@ function App(){
   const nav=isCEO?ceoNav:tlNav;
   if(!booted) return <Splash/>;
   if(!user) return <Login onLogin={login}/>;
-  const ck=activeCampaign+":"+dataV;
+  const ck=activeCampaign;   // remount only on campaign switch, never on data sync
   return(
     <div style={s.app}>
       <div style={s.sb}>
@@ -1924,13 +1951,13 @@ function App(){
         {page==="hourly"&&<HourlyInput key={ck} user={user} activeCampaign={activeCampaign}/>}
         {page==="dayoff"&&<DayOffControl key={ck} user={user} activeCampaign={activeCampaign} isCEO={isCEO}/>}
         {page==="unplanned"&&<UnplannedTracker key={ck} user={user} activeCampaign={activeCampaign} isCEO={isCEO}/>}
-        {page==="attrition"&&<AttritionLog key={"a"+dataV} user={user} isCEO={isCEO}/>}
+        {page==="attrition"&&<AttritionLog key="attrition" user={user} isCEO={isCEO}/>}
         {page==="hr"&&<HRRecords key={ck} user={user} activeCampaign={activeCampaign} isCEO={isCEO}/>}
         {page==="reports"&&<Reports key={ck} user={user} activeCampaign={activeCampaign} isCEO={isCEO}/>}
         {page==="config"&&(isCEO?<ConfigPage key={ck} activeCampaign={activeCampaign} setActiveCampaign={setActiveCampaign}/>:<div style={s.alert(C.red)}>🚫 Access denied. CEO only.</div>)}
         {page==="compliance"&&<ComplianceView key={ck} activeCampaign={activeCampaign} user={user} isCEO={isCEO}/>}
         {page==="watchlist"&&<WatchlistView key={ck} activeCampaign={activeCampaign} user={user} isCEO={isCEO}/>}
-        {page==="users"&&(isCEO?<UserManagement key={"u"+dataV}/>:<div style={s.alert(C.red)}>🚫 Access denied. CEO only.</div>)}
+        {page==="users"&&(isCEO?<UserManagement key="users"/>:<div style={s.alert(C.red)}>🚫 Access denied. CEO only.</div>)}
       </div>
     </div>
   );
