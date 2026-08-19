@@ -536,11 +536,12 @@ const SectionTitle = ({children})=><div style={s.ctitle}>{children}</div>;
         if(!c.hours) return;                       // nothing entered that day — not a gap
         const dOn=dayoff.filter(r=>recDate(r)===date&&normTeam(r.team)===team);
         const uOn=unpl.filter(r=>recDate(r)===date&&normTeam(r.team)===team);
+        const uniqA=(arr)=>new Set(arr.map(r=>normAgent(r.agentName)).filter(Boolean)).size;
         const logged={
-          dayoff:dOn.filter(isPlannedRecord).length,
-          sick:dOn.filter(r=>String(r.type||"").toLowerCase()==="sick").length+uOn.filter(isSickRecord).length,
-          emergency:dOn.filter(r=>String(r.type||"").toLowerCase()==="emergency").length,
-          unpl:uOn.length,
+          dayoff:uniqA(dOn.filter(isPlannedRecord)),
+          sick:uniqA(dOn.filter(r=>String(r.type||"").toLowerCase()==="sick").concat(uOn.filter(isSickRecord))),
+          emergency:uniqA(dOn.filter(r=>String(r.type||"").toLowerCase()==="emergency")),
+          unpl:uniqA(uOn),
         };
         const gap={
           dayoff:Math.max(0,c.dayoff-logged.dayoff), sick:Math.max(0,c.sick-logged.sick),
@@ -671,8 +672,10 @@ const SectionTitle = ({children})=><div style={s.ctitle}>{children}</div>;
       if(isSickRecord(r)){ const k=a+"||"+m; (sick[k]=sick[k]||{agent:a,month:m,team:normTeam(r.team),items:[]}).items.push(r); }
       if(isPlannedRecord(r)){ const k=a+"||"+m; (planned[k]=planned[k]||{agent:a,month:m,team:normTeam(r.team),items:[]}).items.push(r); }
     });
-    const pick=(obj,limit)=>Object.values(obj).map(v=>({...v,count:v.items.length}))
-      .filter(v=>v.count>=limit).sort((a,b)=>b.month.localeCompare(a.month)||b.count-a.count);
+    const pick=(obj,limit)=>Object.values(obj).map(v=>{
+        const days=[...new Set(v.items.map(r=>recDate(r)).filter(Boolean))].sort();
+        return {...v,count:days.length,days,records:v.items.length,dupes:v.items.length-days.length};
+      }).filter(v=>v.count>=limit).sort((a,b)=>b.month.localeCompare(a.month)||b.count-a.count);
     const months=[...new Set(all.map(r=>ym(recDate(r))).filter(Boolean))].sort().reverse();
     return {sick:pick(sick,SICK_LIMIT), planned:pick(planned,PLANNED_LIMIT), months};
   }
@@ -697,7 +700,8 @@ const SectionTitle = ({children})=><div style={s.ctitle}>{children}</div>;
                 <td style={{...s.td,color:C.sub}}>{tlMap[r.team]||"—"}</td>
                 <td style={s.td}>{r.month}</td>
                 <td style={{...s.td,color,fontWeight:700}}>{r.count} <span style={{color:C.sub,fontWeight:400}}>/ {limit}</span></td>
-                <td style={{...s.td,color:C.sub,fontSize:11.5}}>{r.items.map(x=>recDate(x)).sort().join(", ")}</td>
+                <td style={{...s.td,color:C.sub,fontSize:11.5}}>{(r.days||[]).join(", ")}
+                  {r.dupes>0?<span style={{color:C.amber}}> · ⚠ {r.dupes} duplicate entr{r.dupes===1?"y":"ies"} ignored</span>:null}</td>
               </tr>))}
             </tbody>
           </table>)}
