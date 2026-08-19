@@ -561,11 +561,30 @@ const SectionTitle = ({children})=><div style={s.ctitle}>{children}</div>;
   const recDate = (r)=> r.dayoffDate||r.date||r.requestDate||"";
   const ym = (d)=>String(d||"").slice(0,7);
 
+  // team -> [TL names]. A team can legitimately have more than one TL
+  // (e.g. Nesting is covered by both Nour and Joudy).
   function teamToTL(){
     const users=LS.get("ko_users",DEFAULT_USERS)||[];
     const m={};
-    users.forEach(u=>{ if(u&&u.team&&u.active!==false) m[normTeam(u.team)]=u.name; });
+    users.forEach(u=>{ if(u&&u.team&&u.active!==false&&u.role==="tl"){
+      const t=normTeam(u.team); (m[t]=m[t]||[]).push(u.name); } });
     return m;
+  }
+  const tlLabel=(m,team)=>(m&&m[team]&&m[team].length)?m[team].join(", "):"— unassigned";
+
+  // Every team a user actually handles: the team on their profile PLUS any team
+  // they have logged requests for. Without this, TLs covering several teams
+  // (and teams with nobody assigned) simply vanish from My Watchlist.
+  function teamsForUser(cid,user){
+    const set=new Set();
+    if(!user) return set;
+    if(user.team) set.add(normTeam(user.team));
+    const me=normAgent(user.name).toLowerCase();
+    const all=(LS.get(cKey(cid,"dayoff"),[])||[])
+      .concat(LS.get(cKey(cid,"unplanned"),[])||[])
+      .concat(LS.get("ko_attrition",[])||[]);
+    all.forEach(r=>{ if(r && normAgent(r.submittedBy).toLowerCase()===me && r.team) set.add(normTeam(r.team)); });
+    return set;
   }
 
   // Which hourly bucket is satisfied by which request, and from which tab.
@@ -619,7 +638,7 @@ const SectionTitle = ({children})=><div style={s.ctitle}>{children}</div>;
           gap[m.k]=Math.max(0,(c.claim[m.k]||0)-logged[m.k]);
           total+=gap[m.k];
         });
-        rows.push({date,team,tl:tlMap[team]||"—",claim:c.claim,logged,gap,totalGap:total,
+        rows.push({date,team,tl:tlLabel(tlMap,team),claim:c.claim,logged,gap,totalGap:total,
                    peak:c.peak,hours:c.hours,unbalanced:c.unbalanced,budget:budgetOf[team]||0});
       });
     });
@@ -641,8 +660,10 @@ const SectionTitle = ({children})=><div style={s.ctitle}>{children}</div>;
     const [f,setF]=useState(()=>({range:"30d",from:"",to:""}));
     const R=A_resolve(f);
     const D=useMemo(()=>buildCompliance(activeCampaign,R.from,R.to),[activeCampaign,R.from,R.to]);
-    const mine=isCEO?D.tls:D.tls.filter(t=>t.tl===user.name);
-    const rows=isCEO?D.rows:D.rows.filter(r=>r.tl===user.name);
+    const myTeams=useMemo(()=>teamsForUser(activeCampaign,user),[activeCampaign,user,D]);
+    const mine=isCEO?D.tls:D.tls.filter(t=>String(t.tl).split(", ").indexOf(user.name)>=0
+                                        || t.teams.split(", ").some(x=>myTeams.has(x)));
+    const rows=isCEO?D.rows:D.rows.filter(r=>myTeams.has(r.team));
     const totalMissing=mine.reduce((a,t)=>a+t.missing,0);
     const totalUnbal=mine.reduce((a,t)=>a+t.unbalanced,0);
     const offenders=mine.filter(t=>t.missing>0);
@@ -767,7 +788,8 @@ const SectionTitle = ({children})=><div style={s.ctitle}>{children}</div>;
     const [month,setMonth]=useState(thisMonth);
     const W=useMemo(()=>buildWatchlist(activeCampaign,month),[activeCampaign,month]);
     const tlMap=teamToTL();
-    const mineOnly=(arr)=>isCEO?arr:arr.filter(x=>tlMap[x.team]===user.name||x.team===normTeam(user.team));
+    const myTeams=useMemo(()=>teamsForUser(activeCampaign,user),[activeCampaign,user,W]);
+    const mineOnly=(arr)=>isCEO?arr:arr.filter(x=>myTeams.has(normTeam(x.team)));
     const sick=mineOnly(W.sick), planned=mineOnly(W.planned);
     const Card=({title,rows,limit,color,note})=>(
       <div style={s.card()}>
@@ -779,7 +801,7 @@ const SectionTitle = ({children})=><div style={s.ctitle}>{children}</div>;
               <tr key={r.agent+r.month}>
                 <td style={s.td}><strong>{r.agent}</strong></td>
                 <td style={s.td}>{r.team}</td>
-                <td style={{...s.td,color:C.sub}}>{tlMap[r.team]||"—"}</td>
+                <td style={{...s.td,color:C.sub}}>{tlLabel(tlMap,r.team)}</td>
                 <td style={s.td}>{r.month}</td>
                 <td style={{...s.td,color,fontWeight:700}}>{r.count} <span style={{color:C.sub,fontWeight:400}}>/ {limit}</span></td>
                 <td style={{...s.td,color:C.sub,fontSize:11.5}}>{(r.days||[]).join(", ")}
@@ -826,8 +848,8 @@ const SectionTitle = ({children})=><div style={s.ctitle}>{children}</div>;
   function WatchlistAlert({activeCampaign,user,isCEO}){
     const month=todayStr().slice(0,7);
     const W=useMemo(()=>buildWatchlist(activeCampaign,month),[activeCampaign,month]);
-    const tlMap=teamToTL();
-    const f=(arr)=>isCEO?arr:arr.filter(x=>tlMap[x.team]===user?.name||x.team===normTeam(user?.team));
+    const myTeams=useMemo(()=>teamsForUser(activeCampaign,user),[activeCampaign,user,W]);
+    const f=(arr)=>isCEO?arr:arr.filter(x=>myTeams.has(normTeam(x.team)));
     const sick=f(W.sick), planned=f(W.planned);
     if(!sick.length&&!planned.length) return null;
     return (
